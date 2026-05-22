@@ -1,0 +1,25 @@
+{
+  "name": "team-contact-departure",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Supplier Evidence Gate PoC for Airbus Fly Your Ideas 2026.",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke:offline": "tsx scripts/smoke-offline.ts",
+    "smoke:agent": "tsx scripts/smoke-agent.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.75.4",
+    "@earendil-works/pi-coding-agent": "0.75.4",
+    "typebox": "1.1.38"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}
