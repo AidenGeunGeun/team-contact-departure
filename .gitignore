@@ -1,0 +1,58 @@
+# Non-code context (submission docs, briefs, pitches) — kept locally for reference,
+# not part of the code deliverable
+*.pdf
+Airbus Fly Your Ideas 2026 - Round 1 Submission.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*~
+
+# Node / Bun (pi runtime is TS/Bun)
+node_modules/
+.bun/
+dist/
+build/
+*.tsbuildinfo
+.npm/
+
+# Python (test infrastructure wrappers, PX4 tooling)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Logs
+*.log
+logs/
+
+# Runtime artifacts that should NOT be committed by default.
+# Demonstration bundles intended for the repo go under demo/ or examples/
+# and are tracked explicitly.
+/runs/
+/tmp/
+/cache/
+/.cache/
+
+# OS-specific build outputs from wrapped tools
+*.bc
+*.o
+*.so
+*.dylib
