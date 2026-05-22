@@ -2,6 +2,8 @@
 # not part of the code deliverable
 *.pdf
 Airbus Fly Your Ideas 2026 - Round 1 Submission.md
+/specs/
+/diagrams/
 
 # OS
 .DS_Store
