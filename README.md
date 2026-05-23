@@ -2,15 +2,16 @@
 
 Supplier firmware evidence-orchestration PoC for Airbus Fly Your Ideas 2026.
 
-The first milestone is intentionally small: a pi-coding-agent SDK session with all built-in coding tools disabled and one harmless project tool (`ping`) enabled. This proves the harness shape before we add evidence jobs.
+The current milestone is a small fake evidence-job loop. It proves the agent can browse curated cases, choose a methodology card, launch a non-blocking smoke job, inspect progress/results, and cancel work without exposing arbitrary coding tools.
 
 ## Current Shape
 
 - Runtime: `@earendil-works/pi-coding-agent` via SDK.
 - Default model: `openai-codex/gpt-5.5` with thinking `xhigh`.
-- Built-in pi coding tools are disabled by allowlisting only project tools (`tools: ["ping"]`).
-- Active project tool today: `ping` only.
+- Built-in pi coding tools are disabled by allowlisting only project tools.
+- Active project tools: `list_cases`, `load_case`, `list_test_cards`, `launch_evidence_job`, `inspect_job`, and `cancel_job`.
 - No arbitrary shell, file read, or file write surface is exposed to the model.
+- Fake evidence jobs write ignored runtime artifacts under `runs/<job_id>/`.
 
 ## Commands
 
@@ -30,13 +31,4 @@ npm run smoke:agent
 
 ## Next Milestone
 
-Replace the smoke tool with the first evidence-job surface:
-
-- `load_case`
-- `list_test_cards`
-- `launch_job`
-- `get_job_status`
-- `get_job_result`
-- `cancel_job`
-
-The first runner can be fake/smoke-only. Real PX4 jobs come after the job lifecycle is proven.
+Replace the fake smoke runner with the first real evidence runner shape. PX4/SITL, dashboard work, Docker, and replay bundles remain out of scope until this tool loop is reviewed.

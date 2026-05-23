@@ -1,7 +1,11 @@
 import { createContactDepartureSession } from "../src/session.js";
 
 const prompt = process.argv.slice(2).join(" ").trim() ||
-  "Verify the Contact Departure harness by calling ping with message baseline-ok, then summarize the result in one sentence.";
+  [
+    "Run one Contact Departure fake evidence job end to end.",
+    "List the curated cases, load the MAVLink battery/status parser-bounds case, list the test cards, choose the parser-bounds card, and launch the fake job with target_commit post-patch-demo.",
+    "Inspect the job until it reaches a terminal state, then summarize cautiously with the verdict and artifact paths. Make clear this is fake smoke-runner evidence, not PX4/SITL evidence.",
+  ].join(" ");
 
 const { session, modelFallbackMessage } = await createContactDepartureSession({ persistSession: true });
 
@@ -24,8 +28,8 @@ try {
     console.log();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (message.includes("No API key found")) {
-      console.error("Model-backed smoke test needs pi auth. Run `npx pi`, then `/login openai-codex`, then retry.");
+    if (/api key|auth|login|unauthorized|forbidden/i.test(message)) {
+      console.error("Model-backed smoke test needs pi auth for openai-codex. Run `npx pi`, then `/login openai-codex`, then retry.");
     } else {
       console.error(message);
     }

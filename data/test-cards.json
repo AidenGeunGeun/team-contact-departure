@@ -1,0 +1,35 @@
+[
+  {
+    "id": "mavlink-parser-bounds",
+    "title": "MAVLink parser bounds smoke",
+    "plain_language_use": "Use this when the claim is about rejecting malformed MAVLink telemetry without breaking normal messages.",
+    "conceptual_run": "Replay a small mix of normal and malformed telemetry frames through a fake parser harness and compare accepted versus rejected frames.",
+    "evidence_signals": [
+      "malformed frames are rejected before field copy",
+      "normal BATTERY_STATUS frames still pass",
+      "the result distinguishes pre-patch-demo and post-patch-demo commits"
+    ]
+  },
+  {
+    "id": "mavlink-ftp-path-handling",
+    "title": "MAVLink FTP path handling smoke",
+    "plain_language_use": "Use this when the claim is about path normalization, traversal rejection, or keeping file access inside an expected root.",
+    "conceptual_run": "Feed representative FTP paths into a fake normalizer and record which paths would be accepted, normalized, or rejected.",
+    "evidence_signals": [
+      "parent-directory traversal is rejected",
+      "absolute paths do not escape the configured root",
+      "ordinary mission-storage reads remain accepted"
+    ]
+  },
+  {
+    "id": "telemetry-conformance-review",
+    "title": "Telemetry conformance review smoke",
+    "plain_language_use": "Use this when the claim is vague, broad, or missing enough detail for an automated parser/path test.",
+    "conceptual_run": "Create a structured review note that lists missing claim details, plausible evidence to request, and a cautious provisional finding.",
+    "evidence_signals": [
+      "claim names a concrete message family or trigger",
+      "acceptance threshold is explicit",
+      "manual follow-up questions are captured"
+    ]
+  }
+]
