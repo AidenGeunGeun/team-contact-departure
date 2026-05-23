@@ -247,7 +247,8 @@ export const listTestCardsTool = defineTool<typeof emptySchema, ListTestCardsDet
 export const launchEvidenceJobTool = defineTool<typeof launchEvidenceJobSchema, JobLaunchDetails>({
   name: "launch_evidence_job",
   label: "launch evidence job",
-  description: "Launch a non-blocking evidence job for a curated case and test card. The selected case decides whether the runner is real static-source evidence or fake smoke evidence.",
+  description:
+    "Launch a non-blocking evidence job for a curated case and test card. The selected case picks the runner: static-source evidence (PX4 checkout analysis), MAVLink parser-library fuzz, PX4 SITL runtime probe, or fake smoke evidence.",
   promptSnippet: "Start an evidence job and keep the returned job_id for inspection or cancellation.",
   parameters: launchEvidenceJobSchema,
   executionMode: "parallel",

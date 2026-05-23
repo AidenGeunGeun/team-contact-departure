@@ -177,9 +177,13 @@ assert.equal(cancelledAfterDelay.details.result?.verdict, "cancelled");
 // ---- Static-source runner: cancellation ------------------------------------
 
 // Force a cold cache so the runner has to fetch, giving the cancellation a window
-// to land before the work completes.
-rmSync(join(repoRoot, ".cache", "px4"), { recursive: true, force: true });
-rmSync(join(repoRoot, ".cache", "px4.lock"), { recursive: true, force: true });
+// to land before the work completes. Skip when a prepared PX4 SITL binary exists so
+// offline smoke does not destroy an integrator-ready runtime setup.
+const preparedPx4Binary = join(repoRoot, ".cache", "px4", "build", "px4_sitl_default", "bin", "px4");
+if (!existsSync(preparedPx4Binary)) {
+  rmSync(join(repoRoot, ".cache", "px4"), { recursive: true, force: true });
+  rmSync(join(repoRoot, ".cache", "px4.lock"), { recursive: true, force: true });
+}
 
 const staticCancelLaunch = await runLaunchEvidenceJob({
   case_id: "mavlink-battery-status-bounds",

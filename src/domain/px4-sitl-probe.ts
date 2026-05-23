@@ -134,6 +134,42 @@ function px4BinaryPath(config: Px4SitlProbeConfig): string {
   return join(px4Root(config), config.sitl_binary_relative);
 }
 
+function preflightBlocksRuntime(preflight: PreflightReport): { blocked: boolean; reason: string } {
+  if (preflight.px4_binary_present) {
+    return { blocked: false, reason: "" };
+  }
+  if (!preflight.all_required_available) {
+    const missing = preflight.checks
+      .filter((c) => c.required && !c.available)
+      .map((c) => c.name)
+      .join(", ");
+    return {
+      blocked: true,
+      reason: `Runtime unavailable: required build tools missing (${missing}).`,
+    };
+  }
+  return { blocked: false, reason: "" };
+}
+
+function runtimeUnavailableAfterSetup(
+  budget: Px4SitlProbeBudgetProfile,
+  setupNote: string,
+): string {
+  if (!budget.attempt_build) {
+    return "Runtime unavailable: no local PX4 SITL binary is present and this budget profile skips build attempts.";
+  }
+  if (setupNote.includes("repository not present")) {
+    return "Runtime unavailable: PX4 source checkout is not present in the cache, so a SITL binary could not be built.";
+  }
+  if (setupNote.includes("build failed")) {
+    return "Runtime unavailable: a PX4 SITL build was attempted under this budget profile but failed; see px4-setup.log.";
+  }
+  if (setupNote.includes("binary still missing")) {
+    return "Runtime unavailable: PX4 build finished but the expected SITL binary is still missing.";
+  }
+  return "Runtime unavailable: PX4 SITL binary is not present locally after setup.";
+}
+
 function resolveBudgetProfile(
   config: Px4SitlProbeConfig,
   budgetProfile: string,
@@ -531,12 +567,9 @@ export async function producePx4SitlProbeEvidence(
   const preflight = await runPreflight(config);
   await writePreflightArtifact(options.artifact_dir, preflight);
 
-  if (!preflight.all_required_available) {
-    const missing = preflight.checks
-      .filter((c) => c.required && !c.available)
-      .map((c) => c.name)
-      .join(", ");
-    const reason = `Runtime unavailable: required build tools missing (${missing}).`;
+  const preflightGate = preflightBlocksRuntime(preflight);
+  if (preflightGate.blocked) {
+    const reason = preflightGate.reason;
     await writeRuntimeUnavailableArtifacts(
       options.artifact_dir,
       preflight,
@@ -566,8 +599,7 @@ export async function producePx4SitlProbeEvidence(
   await writeSetupLog(options.artifact_dir, setupNote);
 
   if (!existsSync(px4BinaryPath(config))) {
-    const reason =
-      "Runtime unavailable: PX4 SITL binary is not present locally and this budget profile did not build one.";
+    const reason = runtimeUnavailableAfterSetup(budget, setupNote);
     await writeRuntimeUnavailableArtifacts(options.artifact_dir, preflight, reason, setupNote);
     return {
       kind: "evidence",
