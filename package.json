@@ -10,7 +10,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "smoke:offline": "tsx scripts/smoke-offline.ts",
-    "smoke:agent": "tsx scripts/smoke-agent.ts"
+    "smoke:agent": "tsx scripts/smoke-agent.ts",
+    "dashboard": "tsx src/dashboard/server.ts",
+    "smoke:dashboard": "tsx scripts/smoke-dashboard.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.75.4",
