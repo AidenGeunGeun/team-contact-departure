@@ -11,6 +11,18 @@
     ]
   },
   {
+    "id": "px4-sitl-probe",
+    "title": "PX4 SITL runtime probe",
+    "plain_language_use": "Use this when you need to show the agent reached a real PX4 runtime surface and either observed live MAVLink behavior or recorded why the local environment could not run PX4.",
+    "conceptual_run": "Run preflight on build/runtime dependencies, reuse or note PX4 setup, attempt a headless PX4 SITL boot, observe MAVLink heartbeat/connection metadata when possible, stop cleanly, and write runtime probe artifacts with explicit caveats.",
+    "evidence_signals": [
+      "preflight-report.json records tool and dependency availability",
+      "px4-setup.log explains whether PX4 was built, reused, skipped, or blocked",
+      "mavlink-observation.json records heartbeat/connection metadata or why observation was impossible",
+      "evidence-summary.md states runtime observed, unavailable, or abnormal without claiming firmware safety"
+    ]
+  },
+  {
     "id": "mavlink-parser-fuzz",
     "title": "MAVLink parser library fuzz",
     "plain_language_use": "Use this when the claim is about MAVLink parser robustness and you want real parser-library action evidence via pymavlink, not PX4 source inspection alone.",

@@ -21,6 +21,8 @@ const jobsModuleUrl = new URL("../src/domain/jobs.ts", import.meta.url).href;
 const terminalStates = new Set(["succeeded", "failed", "cancelled"]);
 const STATIC_SOURCE_TIMEOUT_MS = 120_000;
 const MAVLINK_PARSER_FUZZ_TIMEOUT_MS = 180_000;
+const PX4_SITL_PROBE_TIMEOUT_MS = 120_000;
+const ALLOWED_PROBE_OUTCOMES = new Set(["runtime_observed", "runtime_unavailable", "runtime_abnormal"]);
 const ALLOWED_STATIC_VERDICTS = new Set([
   "static_evidence_consistent_with_claim",
   "static_evidence_conflicts_with_claim",
@@ -94,17 +96,19 @@ function inspectFromFreshProcess(jobId: string): JobInspectionDetails {
 // ---- Catalog assertions ----------------------------------------------------
 
 const cases = await runListCases();
-assert.equal(cases.details.cases.length >= 4, true);
+assert.equal(cases.details.cases.length >= 5, true);
 assert.equal(cases.details.cases.some((item) => item.id === "mavlink-battery-status-bounds"), true);
 assert.equal(cases.details.cases.some((item) => item.id === "mavlink-parser-library-fuzz"), true);
+assert.equal(cases.details.cases.some((item) => item.id === "px4-runtime-probe"), true);
 
 const loadedCase = await runLoadCase({ case_id: "mavlink-battery-status-bounds" });
 assert.equal(loadedCase.details.case.doc_snippet.includes("BATTERY_STATUS"), true);
 
 const testCards = await runListTestCards();
-assert.equal(testCards.details.test_cards.length >= 4, true);
+assert.equal(testCards.details.test_cards.length >= 5, true);
 assert.equal(testCards.details.test_cards.some((item) => item.id === "mavlink-parser-bounds"), true);
 assert.equal(testCards.details.test_cards.some((item) => item.id === "mavlink-parser-fuzz"), true);
+assert.equal(testCards.details.test_cards.some((item) => item.id === "px4-sitl-probe"), true);
 
 // ---- Fake runner: FTP case end-to-end --------------------------------------
 
@@ -385,6 +389,74 @@ if (fuzzComplete.details.state === "succeeded") {
   assert.equal(existsSync(failurePath!), true);
 }
 
+// ---- PX4 SITL probe runner: end-to-end -------------------------------------
+
+const probeLaunch = await runLaunchEvidenceJob({
+  case_id: "px4-runtime-probe",
+  test_card_id: "px4-sitl-probe",
+  target_commit: "px4-sitl-probe-smoke",
+  budget_profile: "smoke-fast",
+});
+assert.equal(probeLaunch.details.state, "queued");
+assertRunnerProcess(probeLaunch.details, {
+  kind: "px4-sitl-probe",
+  entrypoint: "src/runners/px4-sitl-probe-runner.ts",
+});
+assert.equal(existsSync(probeLaunch.details.run_dir), true);
+assert.equal(existsSync(`${probeLaunch.details.run_dir}/job.json`), true);
+assert.equal(existsSync(probeLaunch.details.artifact_dir), true);
+
+const probeComplete = await waitForState(
+  probeLaunch.details.job_id,
+  (state) => terminalStates.has(state),
+  PX4_SITL_PROBE_TIMEOUT_MS,
+);
+const probeResult = probeComplete.details.result;
+assert.ok(probeResult, "PX4 SITL probe job should have a result");
+assert.equal(probeResult.runner_kind, "px4-sitl-probe");
+assert.equal(["succeeded", "failed"].includes(probeComplete.details.state), true);
+
+if (probeComplete.details.state === "succeeded") {
+  assert.ok(probeResult.px4_sitl_probe, "px4_sitl_probe metadata should be present");
+  assert.equal(
+    ALLOWED_PROBE_OUTCOMES.has(probeResult.px4_sitl_probe?.outcome ?? ""),
+    true,
+    `outcome ${probeResult.px4_sitl_probe?.outcome} should be a runtime probe outcome`,
+  );
+  assert.equal(
+    ["manual_review_needed", "attention_required"].includes(probeResult.verdict ?? ""),
+    true,
+  );
+
+  const requiredArtifacts = [
+    "evidence-summary.md",
+    "preflight-report.json",
+    "preflight-report.md",
+    "px4-setup.log",
+    "runtime.log",
+    "mavlink-observation.json",
+    "runner.log",
+  ];
+  for (const name of requiredArtifacts) {
+    const artifactPath: string | undefined = probeResult.artifact_paths.find((p) => p.endsWith(name));
+    assert.ok(artifactPath, `${name} must be present in artifact_paths`);
+    assert.equal(existsSync(artifactPath), true, `${artifactPath} should exist`);
+  }
+
+  const preflight = JSON.parse(
+    readFileSync(probeResult.artifact_paths.find((p) => p.endsWith("preflight-report.json"))!, "utf8"),
+  );
+  assert.ok(preflight.checks && Array.isArray(preflight.checks));
+
+  const cautionText = (probeResult.cautions ?? []).join(" ").toLowerCase();
+  assert.equal(cautionText.includes("runtime probe"), true);
+  assert.equal(cautionText.includes("does not prove firmware safety"), true);
+} else {
+  const failurePath = probeResult.artifact_paths.find((p) => p.endsWith("failure.md"));
+  assert.ok(failurePath, "failure.md must be present when PX4 SITL probe setup fails");
+  assert.equal(existsSync(failurePath!), true);
+}
+
 // ---- Tool surface ----------------------------------------------------------
 
 const { session } = await createContactDepartureSession();
@@ -449,6 +521,15 @@ try {
           pymavlink_version: fuzzResult?.mavlink_parser_fuzz?.pymavlink_version,
           mutation_budget: fuzzResult?.mavlink_parser_fuzz?.mutation_budget,
           artifacts: fuzzResult?.artifact_paths,
+        },
+        px4SitlProbe: {
+          job_id: probeComplete.details.job_id,
+          state: probeComplete.details.state,
+          verdict: probeResult?.verdict,
+          runner_kind: probeResult?.runner_kind,
+          outcome: probeResult?.px4_sitl_probe?.outcome,
+          heartbeat_observed: probeResult?.px4_sitl_probe?.heartbeat_observed,
+          artifacts: probeResult?.artifact_paths,
         },
       },
       null,

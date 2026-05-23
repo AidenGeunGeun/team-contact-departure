@@ -330,6 +330,12 @@ h3 {
   color: #1565c0;
 }
 
+.runner-pill.probe {
+  border-color: rgba(120, 86, 40, 0.35);
+  background: rgba(120, 86, 40, 0.1);
+  color: #785628;
+}
+
 .summary-grid {
   display: grid;
   grid-template-columns: minmax(220px, 1.3fr) repeat(3, minmax(150px, 1fr));

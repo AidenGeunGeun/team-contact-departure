@@ -13,6 +13,20 @@
     "doc_snippet": "A supplier note claims a MAVLink battery/status parser now rejects malformed payload lengths before copying fields into the telemetry state. The public snippet says the fix should preserve normal BATTERY_STATUS handling while refusing frames whose declared extension fields exceed the parser buffer."
   },
   {
+    "id": "px4-runtime-probe",
+    "title": "PX4 SITL runtime probe",
+    "short_description": "Runtime probe that attempts a headless PX4 SITL boot and records live MAVLink observation or the exact local blocker.",
+    "source_citation": "Curated PX4 runtime probe fixture for Contact Departure, 2026-05-24.",
+    "target_family": "PX4 SITL runtime (headless boot, MAVLink heartbeat observation)",
+    "constraints": [
+      "Evidence for this case is a constrained PX4 runtime probe, not static source inspection and not parser-library fuzzing.",
+      "Use the px4-sitl-probe test card. target_commit is a run label (for example px4-sitl-probe-demo), not a PX4 revision selector.",
+      "Treat the outcome as runtime probe evidence only. Do not claim firmware safety or that any parser-bounds fix is proven at runtime.",
+      "A runtime-unavailable outcome with clear preflight or setup artifacts is valid evidence when the local machine cannot run PX4."
+    ],
+    "doc_snippet": "A supplier note asks whether the agent can reach real PX4 firmware runtime, not only source inspection or parser-library tests. This case launches a bounded headless PX4 SITL probe, attempts to observe live MAVLink behavior such as a heartbeat, and records exactly what ran or which prerequisite blocked runtime."
+  },
+  {
     "id": "mavlink-parser-library-fuzz",
     "title": "MAVLink parser library fuzz (BATTERY_STATUS)",
     "short_description": "Parser-library robustness case that mutates real MAVLink v2 BATTERY_STATUS frames and feeds them into pymavlink.",

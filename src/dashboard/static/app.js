@@ -112,6 +112,9 @@ function runnerLabel(runnerKind) {
   if (runnerKind === "mavlink-parser-fuzz") {
     return "MAVLink parser library fuzz";
   }
+  if (runnerKind === "px4-sitl-probe") {
+    return "PX4 SITL runtime probe";
+  }
   return text(runnerKind, "unknown runner");
 }
 
@@ -124,6 +127,9 @@ function runnerClass(runnerKind) {
   }
   if (runnerKind === "mavlink-parser-fuzz") {
     return "runner-pill fuzz";
+  }
+  if (runnerKind === "px4-sitl-probe") {
+    return "runner-pill probe";
   }
   return "runner-pill";
 }
@@ -225,7 +231,13 @@ function renderDetail(detail) {
   elements.progressFill.style.width = `${detail.progress}%`;
   elements.phaseLabel.textContent = text(detail.phase);
   elements.verdictLabel.textContent = titleize(detail.result?.verdict || detail.verdict || "pending");
-  elements.verdictKindLabel.textContent = titleize(detail.result?.static_source?.verdict_kind || detail.verdict_kind || "pending");
+  const probeMeta = detail.result?.px4_sitl_probe;
+  const probeKindLabel = probeMeta?.failure_stage
+    ? `runner failed (${probeMeta.failure_stage})`
+    : probeMeta?.outcome;
+  elements.verdictKindLabel.textContent = titleize(
+    detail.result?.static_source?.verdict_kind || probeKindLabel || detail.verdict_kind || "pending",
+  );
 
   renderCaveats(detail);
   renderStaticMetadata(detail.result?.static_source);
@@ -242,6 +254,9 @@ function renderCaveats(detail) {
   }
   if (detail.runner_kind === "mavlink-parser-fuzz") {
     caveats.push("Parser-library evidence only. This job used pymavlink on mutated frames; it is not PX4 SITL or firmware runtime proof.");
+  }
+  if (detail.runner_kind === "px4-sitl-probe") {
+    caveats.push("PX4 runtime probe evidence only. A heartbeat observation does not prove firmware safety or parser-bounds fixes at runtime.");
   }
   for (const caution of detail.result?.cautions || []) {
     if (!caveats.includes(caution)) {

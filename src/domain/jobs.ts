@@ -13,6 +13,14 @@ import {
   type MavlinkParserFuzzOutcome,
 } from "./mavlink-parser-fuzz.js";
 import {
+  loadPx4SitlProbeConfig,
+  px4SitlProbeArtifactPaths,
+  producePx4SitlProbeEvidence,
+  type Px4SitlProbeConfig,
+  type Px4SitlProbeOutcome,
+  type Px4SitlProbeOutcomeKind,
+} from "./px4-sitl-probe.js";
+import {
   loadStaticSourceConfig,
   produceStaticSourceEvidence,
   type StaticSourceConfig,
@@ -67,7 +75,7 @@ export interface EvidenceSignal {
   interpretation: string;
 }
 
-export type RunnerKind = "fake-smoke" | "static-source-evidence" | "mavlink-parser-fuzz";
+export type RunnerKind = "fake-smoke" | "static-source-evidence" | "mavlink-parser-fuzz" | "px4-sitl-probe";
 
 export interface EvidenceResult {
   job_id: string;
@@ -82,6 +90,21 @@ export interface EvidenceResult {
   runner_kind?: RunnerKind;
   static_source?: StaticSourceResultMetadata;
   mavlink_parser_fuzz?: MavlinkParserFuzzResultMetadata;
+  px4_sitl_probe?: Px4SitlProbeResultMetadata;
+}
+
+export interface Px4SitlProbeResultMetadata {
+  case_id: string;
+  test_card_id: string;
+  target_commit: string;
+  outcome?: Px4SitlProbeOutcomeKind;
+  failure_stage?: string;
+  pymavlink_version: string;
+  python_version: string;
+  mavlink_connection: string;
+  heartbeat_observed: boolean;
+  px4_binary_present: boolean;
+  budget_profile: string;
 }
 
 export interface MavlinkParserFuzzResultMetadata {
@@ -184,6 +207,10 @@ const MAVLINK_PARSER_FUZZ_RUNNER_ENTRYPOINT = "src/runners/mavlink-parser-fuzz-r
 const MAVLINK_PARSER_FUZZ_RUNNER_SCRIPT_PATH = fileURLToPath(
   new URL("../runners/mavlink-parser-fuzz-runner.ts", import.meta.url),
 );
+const PX4_SITL_PROBE_RUNNER_ENTRYPOINT = "src/runners/px4-sitl-probe-runner.ts";
+const PX4_SITL_PROBE_RUNNER_SCRIPT_PATH = fileURLToPath(
+  new URL("../runners/px4-sitl-probe-runner.ts", import.meta.url),
+);
 const RUNNER_CANCEL_SIGNAL = "SIGTERM" as const;
 const JOB_LOCK_DIR_NAME = ".state-lock";
 const JOB_FILE_LOCK_TIMEOUT_MS = 5000;
@@ -191,6 +218,7 @@ const JOB_FILE_LOCK_POLL_MS = 10;
 const FAKE_STEP_DELAY_MS = 250;
 const STATIC_SOURCE_EXPECTED_DURATION_MS = 120_000;
 const MAVLINK_PARSER_FUZZ_EXPECTED_DURATION_MS = 180_000;
+const PX4_SITL_PROBE_EXPECTED_DURATION_MS = 180_000;
 const FAKE_STEPS = [
   {
     phase: "preparing-fixtures",
@@ -651,7 +679,9 @@ async function completeFailedJob(jobId: string, message: string): Promise<JobSta
         ? `The static-source evidence runner failed: ${message}`
         : runnerKind === "mavlink-parser-fuzz"
           ? `The MAVLink parser fuzz runner failed: ${message}`
-          : `The fake evidence runner failed: ${message}`;
+          : runnerKind === "px4-sitl-probe"
+            ? `The PX4 SITL probe runner failed: ${message}`
+            : `The fake evidence runner failed: ${message}`;
     const cautions =
       runnerKind === "static-source-evidence"
         ? ["This is a static-source runner infrastructure failure, not firmware evidence."]
@@ -660,7 +690,12 @@ async function completeFailedJob(jobId: string, message: string): Promise<JobSta
               "This is a parser-library runner infrastructure failure, not firmware evidence.",
               "This is not PX4 SITL evidence.",
             ]
-          : ["This is a fake runner infrastructure failure, not firmware evidence."];
+          : runnerKind === "px4-sitl-probe"
+            ? [
+                "This is a PX4 SITL probe runner infrastructure failure, not runtime observation evidence.",
+                "This does not prove firmware safety.",
+              ]
+            : ["This is a fake runner infrastructure failure, not firmware evidence."];
     const result: EvidenceResult = {
       job_id: jobId,
       state: "failed",
@@ -1268,6 +1303,215 @@ export async function runStandaloneMavlinkParserFuzzJob(jobId: string): Promise<
   }
 }
 
+function probeArtifactPaths(jobId: string, outcome: Px4SitlProbeOutcome): string[] {
+  const paths = jobPaths(jobId);
+  return px4SitlProbeArtifactPaths(paths.artifactDirAbs, outcome).map(relativeToRepo);
+}
+
+async function buildPx4SitlProbeResult(
+  record: JobRecord,
+  outcome: Px4SitlProbeOutcome,
+  completedAt: string,
+): Promise<EvidenceResult> {
+  const artifactList = probeArtifactPaths(record.job_id, outcome);
+  const caseId = record.request.case_id;
+  const testCardId = record.request.test_card_id;
+  const targetCommit = record.request.target_commit;
+  const budgetProfile = record.request.budget_profile;
+
+  if (outcome.kind === "failure") {
+    const failure = outcome.failure;
+    return {
+      job_id: record.job_id,
+      state: "failed",
+      verdict: "runner_failed",
+      confidence: "low",
+      summary: failure.summary,
+      evidence_signals: [
+        {
+          name: "px4_sitl_probe_runner_outcome",
+          value: failure.stage,
+          interpretation: "PX4 SITL probe runner could not complete a runtime observation.",
+        },
+      ],
+      artifact_paths: artifactList,
+      cautions: failure.caveats,
+      completed_at: completedAt,
+      runner_kind: "px4-sitl-probe",
+      px4_sitl_probe: {
+        case_id: caseId,
+        test_card_id: testCardId,
+        target_commit: targetCommit,
+        failure_stage: failure.stage,
+        pymavlink_version: "unknown",
+        python_version: "unknown",
+        mavlink_connection: "unknown",
+        heartbeat_observed: false,
+        px4_binary_present: false,
+        budget_profile: budgetProfile,
+      },
+    };
+  }
+
+  const evidence = outcome.evidence;
+  const verdict =
+    evidence.outcome === "runtime_observed"
+      ? "manual_review_needed"
+      : evidence.outcome === "runtime_abnormal"
+        ? "attention_required"
+        : "manual_review_needed";
+  const confidence = evidence.outcome === "runtime_observed" ? "medium" : "low";
+
+  const signals: EvidenceSignal[] = [
+    {
+      name: "px4_runtime_probe_outcome",
+      value: evidence.outcome,
+      interpretation: evidence.summary,
+    },
+    {
+      name: "px4_sitl_binary_present",
+      value: evidence.px4_binary_present,
+      interpretation: evidence.px4_binary_present
+        ? "A local PX4 SITL binary was available for the probe attempt."
+        : "No local PX4 SITL binary was available; see preflight and setup artifacts.",
+    },
+    {
+      name: "mavlink_heartbeat_observed",
+      value: evidence.heartbeat_observed,
+      interpretation: evidence.heartbeat_observed
+        ? "The probe observed a live MAVLink heartbeat from the PX4 instance."
+        : "No live MAVLink heartbeat was observed during the probe window.",
+    },
+    {
+      name: "mavlink_connection",
+      value: evidence.mavlink_connection,
+      interpretation: "MAVLink connection string used for observation.",
+    },
+  ];
+
+  return {
+    job_id: record.job_id,
+    state: "succeeded",
+    verdict,
+    confidence,
+    summary: evidence.summary,
+    evidence_signals: signals,
+    artifact_paths: artifactList,
+    cautions: evidence.caveats,
+    completed_at: completedAt,
+    runner_kind: "px4-sitl-probe",
+    px4_sitl_probe: {
+      case_id: caseId,
+      test_card_id: testCardId,
+      target_commit: targetCommit,
+      outcome: evidence.outcome,
+      pymavlink_version: evidence.pymavlink_version,
+      python_version: evidence.python_version,
+      mavlink_connection: evidence.mavlink_connection,
+      heartbeat_observed: evidence.heartbeat_observed,
+      px4_binary_present: evidence.px4_binary_present,
+      budget_profile: budgetProfile,
+    },
+  };
+}
+
+async function completeWithPx4SitlProbeOutcome(
+  record: JobRecord,
+  outcome: Px4SitlProbeOutcome,
+): Promise<JobStatus> {
+  return withJobLock(record.job_id, async () => {
+    const current = await readStatus(record.job_id);
+    if (terminal(current.state)) {
+      return current;
+    }
+    const beforeResult = await readStatus(record.job_id);
+    if (terminal(beforeResult.state)) {
+      return beforeResult;
+    }
+    const completedAt = nowIso();
+    const result = await buildPx4SitlProbeResult(record, outcome, completedAt);
+    const paths = jobPaths(record.job_id);
+    await writeJson(paths.resultPath, result);
+    const finalStatus = await updateStatusUnlocked(record.job_id, {
+      state: result.state,
+      phase: result.state === "failed" ? "failed" : "complete",
+      progress: 100,
+      finished_at: result.completed_at,
+      message:
+        result.state === "failed"
+          ? result.summary
+          : "PX4 SITL runtime probe evidence job completed.",
+    });
+    if (finalStatus.state === "cancelled" && finalStatus.state !== result.state) {
+      await writeJson(
+        paths.resultPath,
+        buildCancelledResult(record.job_id, finalStatus.finished_at ?? nowIso(), finalStatus.runner?.type),
+      );
+    }
+    return finalStatus;
+  });
+}
+
+export async function runStandalonePx4SitlProbeJob(jobId: string): Promise<void> {
+  assertSafeJobId(jobId);
+  const controller = new AbortController();
+  installRunnerSignalHandlers(jobId, {
+    kindLabel: "PX4 SITL probe runner",
+    onAbort: () => controller.abort(),
+  });
+  try {
+    if (await shouldStopRunner(jobId)) {
+      return;
+    }
+    const startedStatus = await updateStatus(jobId, {
+      state: "running",
+      phase: "starting",
+      progress: 5,
+      started_at: nowIso(),
+      message: "Standalone PX4 SITL probe runner process started.",
+    });
+    if (terminal(startedStatus.state)) {
+      return;
+    }
+
+    const record = await readJobRecord(jobId);
+    const paths = jobPaths(jobId);
+    const outcome = await producePx4SitlProbeEvidence({
+      case_id: record.request.case_id,
+      test_card_id: record.request.test_card_id,
+      target_commit: record.request.target_commit,
+      budget_profile: record.request.budget_profile,
+      artifact_dir: paths.artifactDirAbs,
+      signal: controller.signal,
+      onProgress: async (phase, progress, message) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (await shouldStopRunner(jobId)) {
+          return;
+        }
+        await updateStatus(jobId, {
+          state: "running",
+          phase,
+          progress,
+          message,
+        });
+      },
+    });
+
+    if (await shouldStopRunner(jobId)) {
+      return;
+    }
+    await completeWithPx4SitlProbeOutcome(record, outcome);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    await completeFailedJob(jobId, message);
+  }
+}
+
 function runnerEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of ["PATH", "TMPDIR", "TEMP", "TMP", "NODE_ENV"] as const) {
@@ -1291,6 +1535,7 @@ function chooseRunnerLaunchPlan(
   caseId: string,
   staticConfig: StaticSourceConfig,
   fuzzConfig: MavlinkParserFuzzConfig,
+  probeConfig: Px4SitlProbeConfig,
 ): RunnerLaunchPlan {
   if (Object.prototype.hasOwnProperty.call(staticConfig.cases, caseId)) {
     return {
@@ -1298,6 +1543,14 @@ function chooseRunnerLaunchPlan(
       entrypoint: STATIC_SOURCE_RUNNER_ENTRYPOINT,
       scriptPath: STATIC_SOURCE_RUNNER_SCRIPT_PATH,
       expectedDurationMs: STATIC_SOURCE_EXPECTED_DURATION_MS,
+    };
+  }
+  if (Object.prototype.hasOwnProperty.call(probeConfig.cases, caseId)) {
+    return {
+      kind: "px4-sitl-probe",
+      entrypoint: PX4_SITL_PROBE_RUNNER_ENTRYPOINT,
+      scriptPath: PX4_SITL_PROBE_RUNNER_SCRIPT_PATH,
+      expectedDurationMs: PX4_SITL_PROBE_EXPECTED_DURATION_MS,
     };
   }
   if (Object.prototype.hasOwnProperty.call(fuzzConfig.cases, caseId)) {
@@ -1374,7 +1627,9 @@ function signalRunnerProcess(status: JobStatus): RunnerSignalResult {
       ? "static-source runner"
       : status.runner?.type === "mavlink-parser-fuzz"
         ? "MAVLink parser fuzz runner"
-        : "fake runner";
+        : status.runner?.type === "px4-sitl-probe"
+          ? "PX4 SITL probe runner"
+          : "fake runner";
   try {
     process.kill(pid, RUNNER_CANCEL_SIGNAL);
     return {
@@ -1402,13 +1657,14 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
     throw new Error("target_commit must be a non-empty string.");
   }
 
-  const [resolvedCase, resolvedTestCard, staticConfig, fuzzConfig] = await Promise.all([
+  const [resolvedCase, resolvedTestCard, staticConfig, fuzzConfig, probeConfig] = await Promise.all([
     loadCase(params.case_id),
     loadTestCard(params.test_card_id),
     loadStaticSourceConfig(),
     loadMavlinkParserFuzzConfig(),
+    loadPx4SitlProbeConfig(),
   ]);
-  const plan = chooseRunnerLaunchPlan(params.case_id, staticConfig, fuzzConfig);
+  const plan = chooseRunnerLaunchPlan(params.case_id, staticConfig, fuzzConfig, probeConfig);
   const jobId = createJobId();
   const paths = jobPaths(jobId);
   const launchedAt = nowIso();
@@ -1434,7 +1690,9 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
       ? "Static-source evidence job queued."
       : plan.kind === "mavlink-parser-fuzz"
         ? "MAVLink parser fuzz evidence job queued."
-        : "Fake evidence job queued.";
+        : plan.kind === "px4-sitl-probe"
+          ? "PX4 SITL runtime probe evidence job queued."
+          : "Fake evidence job queued.";
   const status: JobStatus = {
     job_id: jobId,
     state: "queued",

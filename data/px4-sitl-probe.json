@@ -1,0 +1,31 @@
+{
+  "repository": {
+    "name": "PX4-Autopilot",
+    "url": "https://github.com/PX4/PX4-Autopilot.git"
+  },
+  "pymavlink_version": "2.4.41",
+  "python_commands": ["python3", "python"],
+  "px4_cache_dir": ".cache/px4",
+  "sitl_binary_relative": "build/px4_sitl_default/bin/px4",
+  "mavlink_connection": "udp:127.0.0.1:14540",
+  "cases": {
+    "px4-runtime-probe": {
+      "description": "Headless PX4 SITL runtime probe with live MAVLink heartbeat observation.",
+      "default_target_commit": "px4-sitl-probe-demo"
+    }
+  },
+  "budget_profiles": {
+    "smoke-fast": {
+      "attempt_build": false,
+      "build_timeout_sec": 0,
+      "probe_timeout_sec": 25,
+      "heartbeat_timeout_sec": 20
+    },
+    "local-default": {
+      "attempt_build": true,
+      "build_timeout_sec": 900,
+      "probe_timeout_sec": 60,
+      "heartbeat_timeout_sec": 45
+    }
+  }
+}

@@ -11,11 +11,12 @@ The project shows an agent reading curated public firmware-evidence cases, choos
 - The agent and the dashboard inspect the same artifacts instead of hiding tool execution behind a black box.
 - One case now produces real evidence from real PX4 source at pinned upstream commits.
 - One case now launches a real MAVLink parser-library fuzz runner using pymavlink.
+- One case now launches a real PX4 SITL runtime probe that either observes live MAVLink behavior or records why the local environment could not run PX4.
 
 ## What This Does Not Claim
 
 - It does not prove firmware safety.
-- It does not run PX4 SITL yet.
+- PX4 SITL runtime probe evidence is bounded to a local headless boot and MAVLink heartbeat observation; it is not full runtime fuzzing or replay.
 - Parser-library fuzz evidence uses pymavlink on mutated frames; it does not prove PX4 firmware runtime behavior.
 - It does not discover a new vulnerability.
 - It does not use real supplier-confidential documents.
@@ -49,12 +50,19 @@ For a custom one-shot request:
 ```bash
 npm run agent -- "Evaluate the parser-bounds case at the post-patch alias and summarize cautiously."
 npm run agent -- "Run the MAVLink parser library fuzz case with smoke-fast budget and summarize cautiously."
+npm run agent -- "Run the PX4 SITL runtime probe case with smoke-fast budget and summarize cautiously."
 ```
 
 For a model-backed parser-fuzz demo:
 
 ```bash
 npm run demo:agent -- --parser-fuzz
+```
+
+For a model-backed PX4 SITL runtime probe demo:
+
+```bash
+npm run demo:agent -- --px4-sitl-probe
 ```
 
 Each agent run writes local runtime state under `agent-runs/<timestamp>/`:
@@ -115,6 +123,7 @@ This is the core difference from “just ask a coding agent to run commands.” 
 | --- | --- | --- |
 | `mavlink-battery-status-bounds` | Real static-source inspection of PX4 PR #18411 commit pair. | Real, static-only evidence. |
 | `mavlink-parser-library-fuzz` | Real pymavlink parser-library fuzz on mutated BATTERY_STATUS frames. | Real parser-library action evidence; not PX4 SITL. |
+| `px4-runtime-probe` | Real PX4 SITL runtime probe with preflight, setup notes, and MAVLink observation when possible. | Real runtime probe evidence; not proof of firmware safety. |
 | `mavlink-ftp-path-handling` | Fake smoke runner that simulates path-handling evidence. | Demo scaffold only. |
 | `unclear-telemetry-dropout-claim` | Fake/manual-review smoke runner for vague supplier claims. | Demo scaffold only. |
 
@@ -123,7 +132,8 @@ This is the core difference from “just ask a coding agent to run commands.” 
 | Evidence level | Status |
 | --- | --- |
 | Static PX4 source evidence | Real for PR #18411 parser-bounds case. |
-| MAVLink parser-library fuzz evidence | Real after this milestone, using `pymavlink`; not PX4 SITL. |
+| MAVLink parser-library fuzz evidence | Real, using `pymavlink`; not PX4 SITL. |
+| PX4 SITL runtime probe evidence | Real when a local SITL binary is available; otherwise records runtime-unavailable blockers. |
 | Fake-smoke evidence | Still scaffold for FTP/vague cases. |
 
 ## Real vs Fake
@@ -135,6 +145,7 @@ This is the core difference from “just ask a coding agent to run commands.” 
 | Job lifecycle | Real detached runner processes, status files, events, cancellation. | Runner outputs may be fake depending on case. |
 | Parser-bounds case | Real PX4 source fetch, real pinned commits, real source context, real diff. | Static-only; no runtime execution. |
 | Parser-library fuzz case | Real pymavlink install, real seed generation, real mutations, real parser outcomes. | Parser-library only; not PX4 SITL or firmware runtime proof. |
+| PX4 runtime probe case | Real preflight, PX4 setup notes, optional headless SITL boot, MAVLink observation when possible. | Runtime probe only; heartbeat observation does not prove firmware safety. |
 | FTP case | Job lifecycle and dashboard are real. | Evidence content is simulated. |
 | Telemetry vague-claim case | Job lifecycle and dashboard are real. | Evidence content is simulated/manual-review style. |
 | Dashboard | Real local read-only viewer over run folders. | Visual polish is intentionally basic for now. |
@@ -178,6 +189,26 @@ Verdict semantics are deliberately narrow:
 - `attention_required` means at least one mutated input triggered a parser exception.
 
 This is parser-library evidence only. It does not prove PX4 `MavlinkReceiver` runtime behavior or PX4 SITL safety.
+
+## PX4 SITL Runtime Probe Path
+
+The first real PX4 runtime probe path is case `px4-runtime-probe` with test card `px4-sitl-probe`.
+
+The runner:
+
+1. Writes a preflight report for build/runtime dependencies (git, cmake, make, g++, optional ninja, Python).
+2. Reuses `.cache/px4` when present and records whether a `px4_sitl_default` binary already exists.
+3. Optionally attempts a PX4 build when the budget profile allows it (`local-default`; `smoke-fast` skips build for stable offline smoke).
+4. When a SITL binary is available, starts a headless PX4 instance and attempts a live MAVLink heartbeat observation via pymavlink.
+5. Writes runtime probe artifacts and a cautious summary.
+
+Outcome semantics are deliberately narrow:
+
+- `runtime_observed` means a live MAVLink heartbeat was observed from the local PX4 instance.
+- `runtime_unavailable` means required prerequisites or a local SITL binary were missing; artifacts explain the blocker.
+- `runtime_abnormal` means PX4 appeared to start or partially start, but the expected MAVLink observation did not occur.
+
+This is PX4 runtime probe evidence only. It does not prove firmware safety, parser-bounds fixes at runtime, or vulnerability replay.
 
 ## Dashboard
 
@@ -229,10 +260,11 @@ agent-runs/<timestamp>/summary.json
 | Command | What it proves |
 | --- | --- |
 | `npm run typecheck` | TypeScript compiles. |
-| `npm run smoke:offline` | Tool allowlist, job lifecycle, fake runners, static-source runner, MAVLink parser fuzz runner, cancellation, and artifacts work without model calls. |
+| `npm run smoke:offline` | Tool allowlist, job lifecycle, fake runners, static-source runner, MAVLink parser fuzz runner, PX4 SITL probe runner, cancellation, and artifacts work without model calls. |
 | `npm run smoke:operator` | Agent transcript/report formatting works without model calls. |
 | `npm run demo:agent` | The product-facing agent orchestrates the parser-bounds case end to end and writes a local transcript. Requires `openai-codex` auth. |
 | `npm run demo:agent -- --parser-fuzz` | Same as above, but drives the parser-library fuzz case instead of static-source. Requires `openai-codex` auth. |
+| `npm run demo:agent -- --px4-sitl-probe` | Same as above, but drives the PX4 SITL runtime probe case. Requires `openai-codex` auth. |
 | `npm run agent -- "<prompt>"` | One-shot natural-language agent run with streaming output and transcript/report artifacts. Requires `openai-codex` auth. |
 | `npm run smoke:agent` | Legacy model-backed smoke test for the six-tool loop. Requires `openai-codex` auth. |
 | `npm run dashboard` | Starts the local read-only viewer. |
@@ -253,6 +285,7 @@ src/domain/static-source-evidence.ts
                               real PX4 static-source evidence implementation
 src/domain/mavlink-parser-fuzz.ts
                               real pymavlink parser-library fuzz implementation
+src/domain/px4-sitl-probe.ts  real PX4 SITL runtime probe implementation
 src/runners/                  standalone runner entrypoints and Python harness
 src/dashboard/                local read-only dashboard server and static UI
 runs/                         ignored local evidence job artifacts
@@ -273,9 +306,10 @@ agent-runs/                   ignored local agent transcripts and summaries
 
 ## Current Limitations
 
-- Two cases have real evidence today: static PX4 source and parser-library fuzz.
+- Three cases have real evidence today: static PX4 source, parser-library fuzz, and PX4 SITL runtime probe.
 - Static-source evidence does not execute firmware.
 - Parser-library fuzz uses pymavlink only; it is not PX4 SITL or handler runtime proof.
+- PX4 SITL runtime probe needs Python 3, build tools, and a local PX4 SITL binary for a full runtime-observed result; offline smoke expects the stable runtime-unavailable path when the binary is absent.
 - PX4 source is fetched from GitHub, so the static-source runner needs network access unless the cache is already warm.
 - The parser fuzz runner needs Python 3 and network access on first run to create the pymavlink venv.
 - The local dashboard assumes trusted local run folders and binds to `127.0.0.1` by default.
@@ -285,8 +319,8 @@ agent-runs/                   ignored local agent transcripts and summaries
 
 Good next steps are:
 
-1. Add PX4 SITL or handler-specific runtime harness once the environment is ready.
+1. Extend the PX4 runtime probe with handler-specific checks or bounded runtime fuzz once the SITL path is stable.
 2. Improve dashboard visual design for presentation.
-3. Add a second real runtime case (FTP path handling or telemetry conformance) only after SITL/handler paths are stable.
+3. Add a second real runtime case (FTP path handling or telemetry conformance) only after the probe path is stable.
 
 Avoid adding production queue infrastructure, auth, multi-agent hierarchy, or broad AFL/libFuzzer harnesses until the narrow evidence loop has earned it.
