@@ -1,0 +1,33 @@
+{
+  "repository": {
+    "name": "PX4-Autopilot",
+    "url": "https://github.com/PX4/PX4-Autopilot.git"
+  },
+  "cases": {
+    "mavlink-battery-status-bounds": {
+      "pr_url": "https://github.com/PX4/PX4-Autopilot/pull/18411",
+      "pr_title": "mavlink: receiver battery_status prevent out of bounds access",
+      "target_file": "src/modules/mavlink/mavlink_receiver.cpp",
+      "target_function": "MavlinkReceiver::handle_message_battery_status",
+      "pre_alias": "mavlink-battery-status-bounds-pre",
+      "post_alias": "mavlink-battery-status-bounds-post",
+      "heuristic": "Locate the first while-loop inside handle_message_battery_status that references both cell_count<10 and battery_mavlink.voltages[cell_count]. If the cell_count<10 guard appears before the voltages[cell_count] dereference in the loop header, the bounds check is in place (consistent with the claim). If the dereference appears before the guard, the loop reads voltages[cell_count] before bounds-checking cell_count (conflicts with the claim)."
+    }
+  },
+  "aliases": {
+    "mavlink-battery-status-bounds-pre": {
+      "commit_hash": "12670b70f48fbbd9305ad6074d7f95d9853fc63d",
+      "case_id": "mavlink-battery-status-bounds",
+      "role": "pre-patch",
+      "pair_alias": "mavlink-battery-status-bounds-post",
+      "description": "Parent of the BATTERY_STATUS bounds fix (PR #18411). The while-loop reads battery_mavlink.voltages[cell_count] before checking cell_count<10, so cell_count==10 yields an out-of-bounds read before the guard rejects the iteration."
+    },
+    "mavlink-battery-status-bounds-post": {
+      "commit_hash": "7ec7d9d173b3c4aedccdda51cbe670f70686b4b6",
+      "case_id": "mavlink-battery-status-bounds",
+      "role": "post-patch",
+      "pair_alias": "mavlink-battery-status-bounds-pre",
+      "description": "The BATTERY_STATUS bounds fix from PR #18411. Reorders the while-loop condition so cell_count<10 short-circuits before the voltages[cell_count] access."
+    }
+  }
+}

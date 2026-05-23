@@ -1,8 +1,9 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { JobInspectionDetails, JobLaunchDetails } from "../src/domain/jobs.js";
+import { join } from "node:path";
+import type { JobInspectionDetails, JobLaunchDetails, RunnerKind } from "../src/domain/jobs.js";
 import { createContactDepartureSession } from "../src/session.js";
 import {
   DOMAIN_TOOL_NAMES,
@@ -18,6 +19,13 @@ const expectedTools = [...DOMAIN_TOOL_NAMES].sort();
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 const jobsModuleUrl = new URL("../src/domain/jobs.ts", import.meta.url).href;
 const terminalStates = new Set(["succeeded", "failed", "cancelled"]);
+const STATIC_SOURCE_TIMEOUT_MS = 120_000;
+const ALLOWED_STATIC_VERDICTS = new Set([
+  "static_evidence_consistent_with_claim",
+  "static_evidence_conflicts_with_claim",
+  "static_evidence_inconclusive",
+  "static_evidence_unavailable",
+]);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -30,7 +38,7 @@ async function waitForState(jobId: string, predicate: (state: string) => boolean
     if (Date.now() > deadline) {
       throw new Error(`Timed out waiting for ${jobId}; latest state was ${latest.details.state}`);
     }
-    await sleep(75);
+    await sleep(150);
     latest = await runInspectJob({ job_id: jobId });
   }
   return latest;
@@ -48,12 +56,15 @@ function smokeChildEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function assertRunnerProcess(details: Pick<JobLaunchDetails | JobInspectionDetails, "runner">) {
+function assertRunnerProcess(
+  details: Pick<JobLaunchDetails | JobInspectionDetails, "runner">,
+  expected: { kind: RunnerKind; entrypoint: string },
+) {
   const runner = details.runner;
   const processMetadata = runner?.process;
-  assert.equal(runner?.type, "fake-smoke");
+  assert.equal(runner?.type, expected.kind);
   assert.equal(typeof processMetadata?.pid, "number");
-  assert.equal(processMetadata?.entrypoint, "src/runners/fake-evidence-runner.ts");
+  assert.equal(processMetadata?.entrypoint, expected.entrypoint);
   assert.equal(processMetadata?.detached, true);
   assert.equal(processMetadata?.cancel_signal, "SIGTERM");
 }
@@ -79,50 +90,57 @@ function inspectFromFreshProcess(jobId: string): JobInspectionDetails {
   return JSON.parse(result.stdout) as JobInspectionDetails;
 }
 
+// ---- Catalog assertions ----------------------------------------------------
+
 const cases = await runListCases();
 assert.equal(cases.details.cases.length >= 3, true);
 assert.equal(cases.details.cases.some((item) => item.id === "mavlink-battery-status-bounds"), true);
 
 const loadedCase = await runLoadCase({ case_id: "mavlink-battery-status-bounds" });
-assert.equal(loadedCase.details.case.target_family, "MAVLink telemetry parser");
 assert.equal(loadedCase.details.case.doc_snippet.includes("BATTERY_STATUS"), true);
 
 const testCards = await runListTestCards();
 assert.equal(testCards.details.test_cards.length >= 3, true);
 assert.equal(testCards.details.test_cards.some((item) => item.id === "mavlink-parser-bounds"), true);
 
-const prePatchJob = await runLaunchEvidenceJob({
-  case_id: "mavlink-battery-status-bounds",
-  test_card_id: "mavlink-parser-bounds",
-  target_commit: "pre-patch-demo",
-});
-const postPatchJob = await runLaunchEvidenceJob({
-  case_id: "mavlink-battery-status-bounds",
-  test_card_id: "mavlink-parser-bounds",
+// ---- Fake runner: FTP case end-to-end --------------------------------------
+
+const fakeFtpJob = await runLaunchEvidenceJob({
+  case_id: "mavlink-ftp-path-handling",
+  test_card_id: "mavlink-ftp-path-handling",
   target_commit: "post-patch-demo",
 });
+assert.equal(fakeFtpJob.details.state, "queued");
+assertRunnerProcess(fakeFtpJob.details, {
+  kind: "fake-smoke",
+  entrypoint: "src/runners/fake-evidence-runner.ts",
+});
+assert.equal(existsSync(fakeFtpJob.details.run_dir), true);
+assert.equal(existsSync(`${fakeFtpJob.details.run_dir}/job.json`), true);
+assert.equal(existsSync(fakeFtpJob.details.artifact_dir), true);
 
-for (const launch of [prePatchJob, postPatchJob]) {
-  assert.equal(launch.details.state, "queued");
-  assert.equal(terminalStates.has(launch.details.state), false, "launch should return before completion");
-  assertRunnerProcess(launch.details);
-  assert.equal(existsSync(launch.details.run_dir), true, `${launch.details.run_dir} should exist`);
-  assert.equal(existsSync(`${launch.details.run_dir}/job.json`), true);
-  assert.equal(existsSync(`${launch.details.run_dir}/status.json`), true);
-  assert.equal(existsSync(`${launch.details.run_dir}/events.jsonl`), true);
-  assert.equal(existsSync(launch.details.artifact_dir), true, `${launch.details.artifact_dir} should exist`);
+const fakeFtpRunning = await waitForState(fakeFtpJob.details.job_id, (state) => state === "running", 1500);
+assertRunnerProcess(fakeFtpRunning.details, {
+  kind: "fake-smoke",
+  entrypoint: "src/runners/fake-evidence-runner.ts",
+});
+
+const freshInspection = inspectFromFreshProcess(fakeFtpJob.details.job_id);
+assert.equal(freshInspection.job_id, fakeFtpJob.details.job_id);
+assertRunnerProcess(freshInspection, {
+  kind: "fake-smoke",
+  entrypoint: "src/runners/fake-evidence-runner.ts",
+});
+
+const fakeFtpComplete = await waitForState(fakeFtpJob.details.job_id, (state) => state === "succeeded", 5000);
+assert.equal(fakeFtpComplete.details.result?.runner_kind, "fake-smoke");
+assert.equal(["no_issue_detected", "attention_required"].includes(fakeFtpComplete.details.result?.verdict ?? ""), true);
+assert.equal(fakeFtpComplete.details.result?.artifact_paths.length, 3);
+for (const artifactPath of fakeFtpComplete.details.result?.artifact_paths ?? []) {
+  assert.equal(existsSync(artifactPath), true, `${artifactPath} should exist`);
 }
 
-const runningJob = await waitForState(prePatchJob.details.job_id, (state) => state === "running", 1500);
-assert.equal(runningJob.details.state, "running");
-assert.equal(runningJob.details.progress > 0, true);
-assert.equal(runningJob.details.recent_events.length > 0, true);
-assertRunnerProcess(runningJob.details);
-
-const freshInspection = inspectFromFreshProcess(prePatchJob.details.job_id);
-assert.equal(freshInspection.job_id, prePatchJob.details.job_id);
-assert.equal(terminalStates.has(freshInspection.state), false);
-assertRunnerProcess(freshInspection);
+// ---- Fake runner: cancellation ---------------------------------------------
 
 const cancelJob = await runLaunchEvidenceJob({
   case_id: "mavlink-ftp-path-handling",
@@ -130,29 +148,179 @@ const cancelJob = await runLaunchEvidenceJob({
   target_commit: "cancel-demo",
 });
 assert.equal(cancelJob.details.state, "queued");
-assertRunnerProcess(cancelJob.details);
+assertRunnerProcess(cancelJob.details, {
+  kind: "fake-smoke",
+  entrypoint: "src/runners/fake-evidence-runner.ts",
+});
 const cancelRunning = await waitForState(cancelJob.details.job_id, (state) => state === "running", 1500);
 assert.equal(cancelRunning.details.state, "running");
 
 const cancelled = await runCancelJob({ job_id: cancelJob.details.job_id });
 assert.equal(cancelled.details.state, "cancelled");
 assert.equal(cancelled.details.cancel_action, "cancelled");
-assertRunnerProcess(cancelled.details);
+assertRunnerProcess(cancelled.details, {
+  kind: "fake-smoke",
+  entrypoint: "src/runners/fake-evidence-runner.ts",
+});
 await sleep(1200);
 const cancelledAfterDelay = await runInspectJob({ job_id: cancelJob.details.job_id });
 assert.equal(cancelledAfterDelay.details.state, "cancelled");
 assert.equal(cancelledAfterDelay.details.result?.verdict, "cancelled");
 
-const prePatchComplete = await waitForState(prePatchJob.details.job_id, (state) => state === "succeeded", 5000);
-const postPatchComplete = await waitForState(postPatchJob.details.job_id, (state) => state === "succeeded", 5000);
+// ---- Static-source runner: cancellation ------------------------------------
 
-assert.equal(prePatchComplete.details.result?.verdict, "attention_required");
-assert.equal(postPatchComplete.details.result?.verdict, "mitigation_observed");
-assert.equal(prePatchComplete.details.result?.artifact_paths.length, 3);
-assert.equal(postPatchComplete.details.result?.artifact_paths.length, 3);
-for (const artifactPath of postPatchComplete.details.result?.artifact_paths ?? []) {
-  assert.equal(existsSync(artifactPath), true, `${artifactPath} should exist`);
+// Force a cold cache so the runner has to fetch, giving the cancellation a window
+// to land before the work completes.
+rmSync(join(repoRoot, ".cache", "px4"), { recursive: true, force: true });
+rmSync(join(repoRoot, ".cache", "px4.lock"), { recursive: true, force: true });
+
+const staticCancelLaunch = await runLaunchEvidenceJob({
+  case_id: "mavlink-battery-status-bounds",
+  test_card_id: "mavlink-parser-bounds",
+  target_commit: "mavlink-battery-status-bounds-pre",
+});
+assertRunnerProcess(staticCancelLaunch.details, {
+  kind: "static-source-evidence",
+  entrypoint: "src/runners/static-source-evidence-runner.ts",
+});
+
+const staticCancelled = await runCancelJob({ job_id: staticCancelLaunch.details.job_id });
+assert.equal(staticCancelled.details.state, "cancelled");
+assert.equal(staticCancelled.details.cancel_action, "cancelled");
+assertRunnerProcess(staticCancelled.details, {
+  kind: "static-source-evidence",
+  entrypoint: "src/runners/static-source-evidence-runner.ts",
+});
+await sleep(1500);
+const staticCancelledAfter = await runInspectJob({ job_id: staticCancelLaunch.details.job_id });
+assert.equal(staticCancelledAfter.details.state, "cancelled");
+assert.equal(staticCancelledAfter.details.result?.verdict, "cancelled");
+
+// ---- Static-source runner: parser-bounds pre/post --------------------------
+
+const preLaunch = await runLaunchEvidenceJob({
+  case_id: "mavlink-battery-status-bounds",
+  test_card_id: "mavlink-parser-bounds",
+  target_commit: "mavlink-battery-status-bounds-pre",
+});
+const postLaunch = await runLaunchEvidenceJob({
+  case_id: "mavlink-battery-status-bounds",
+  test_card_id: "mavlink-parser-bounds",
+  target_commit: "mavlink-battery-status-bounds-post",
+});
+
+for (const launch of [preLaunch, postLaunch]) {
+  assert.equal(launch.details.state, "queued");
+  assert.equal(terminalStates.has(launch.details.state), false);
+  assertRunnerProcess(launch.details, {
+    kind: "static-source-evidence",
+    entrypoint: "src/runners/static-source-evidence-runner.ts",
+  });
+  assert.equal(existsSync(launch.details.run_dir), true);
+  assert.equal(existsSync(`${launch.details.run_dir}/job.json`), true);
+  assert.equal(existsSync(launch.details.artifact_dir), true);
 }
+
+const preComplete = await waitForState(
+  preLaunch.details.job_id,
+  (state) => terminalStates.has(state),
+  STATIC_SOURCE_TIMEOUT_MS,
+);
+const postComplete = await waitForState(
+  postLaunch.details.job_id,
+  (state) => terminalStates.has(state),
+  STATIC_SOURCE_TIMEOUT_MS,
+);
+
+for (const completed of [preComplete, postComplete]) {
+  const result = completed.details.result;
+  assert.ok(result, "static-source job should have a result");
+  assert.equal(result.runner_kind, "static-source-evidence");
+  assert.equal(result.static_source?.case_id, "mavlink-battery-status-bounds");
+  assert.equal(result.static_source?.test_card_id, "mavlink-parser-bounds");
+  assert.ok(result.static_source?.resolved_commit_hash, "static_source.resolved_commit_hash should be set");
+  assert.equal(
+    ALLOWED_STATIC_VERDICTS.has(result.static_source?.verdict_kind ?? ""),
+    true,
+    `verdict_kind ${result.static_source?.verdict_kind} should be one of the four allowed values`,
+  );
+  assert.ok(result.summary && result.summary.length > 0);
+  assert.ok(result.artifact_paths.length >= 1);
+  for (const artifactPath of result.artifact_paths) {
+    assert.equal(existsSync(artifactPath), true, `${artifactPath} should exist`);
+  }
+}
+
+const preStatic = preComplete.details.result?.static_source;
+const postStatic = postComplete.details.result?.static_source;
+assert.ok(preStatic);
+assert.ok(postStatic);
+assert.notEqual(
+  preStatic.resolved_commit_hash,
+  postStatic.resolved_commit_hash,
+  "pre and post aliases must resolve to different commit hashes",
+);
+assert.equal(preStatic.resolved_commit_hash, "12670b70f48fbbd9305ad6074d7f95d9853fc63d");
+assert.equal(postStatic.resolved_commit_hash, "7ec7d9d173b3c4aedccdda51cbe670f70686b4b6");
+
+const preState = preComplete.details.state;
+const postState = postComplete.details.state;
+const networkAvailable = preState === "succeeded" && postState === "succeeded";
+let networkNote = "";
+
+if (networkAvailable) {
+  assert.equal(preStatic.verdict_kind, "static_evidence_conflicts_with_claim");
+  assert.equal(postStatic.verdict_kind, "static_evidence_consistent_with_claim");
+  assert.notEqual(preComplete.details.result?.verdict, postComplete.details.result?.verdict);
+
+  for (const completed of [preComplete, postComplete]) {
+    const result = completed.details.result;
+    const sourceContextPath = result?.artifact_paths.find((p) => p.endsWith("source-context.md"));
+    const commitInfoPath = result?.artifact_paths.find((p) => p.endsWith("commit-info.json"));
+    const diffPatchPath = result?.artifact_paths.find((p) => p.endsWith("diff.patch"));
+    const diffSummaryPath = result?.artifact_paths.find((p) => p.endsWith("diff-summary.md"));
+    assert.ok(sourceContextPath, "source-context.md must be present in a successful static-source run");
+    assert.ok(commitInfoPath, "commit-info.json must be present in a successful static-source run");
+    assert.ok(diffPatchPath, "diff.patch must be present when a pre/post pair is implied");
+    assert.ok(diffSummaryPath, "diff-summary.md must be present when a pre/post pair is implied");
+
+    const commitInfo = JSON.parse(readFileSync(commitInfoPath, "utf8"));
+    assert.equal(commitInfo.resolved_commit_hash, result?.static_source?.resolved_commit_hash);
+    assert.equal(commitInfo.target_file, "src/modules/mavlink/mavlink_receiver.cpp");
+
+    const diffPatch = readFileSync(diffPatchPath, "utf8");
+    assert.equal(
+      diffPatch.includes("src/modules/mavlink/mavlink_receiver.cpp"),
+      true,
+      "diff.patch should reference the target file",
+    );
+    assert.equal(
+      diffPatch.includes("handle_message_battery_status"),
+      true,
+      "diff.patch should reference the target function",
+    );
+
+    const sourceContext = readFileSync(sourceContextPath, "utf8");
+    assert.equal(
+      sourceContext.includes("handle_message_battery_status"),
+      true,
+      "source-context.md should mention the target function",
+    );
+  }
+} else {
+  networkNote = `Static-source runner finished without succeeded state on at least one alias (pre=${preState}, post=${postState}); this is the documented network-restricted fallback path.`;
+  for (const completed of [preComplete, postComplete]) {
+    if (completed.details.state !== "succeeded") {
+      assert.equal(completed.details.state, "failed");
+      assert.equal(completed.details.result?.static_source?.verdict_kind, "static_evidence_unavailable");
+      const failurePath = completed.details.result?.artifact_paths.find((p) => p.endsWith("failure.md"));
+      assert.ok(failurePath, "failure.md must be present when the static-source runner cannot produce evidence");
+      assert.equal(existsSync(failurePath), true);
+    }
+  }
+}
+
+// ---- Tool surface ----------------------------------------------------------
 
 const { session } = await createContactDepartureSession();
 try {
@@ -174,14 +342,39 @@ try {
         configuredTools,
         cases: cases.details.cases.map((item) => item.id),
         testCards: testCards.details.test_cards.map((item) => item.id),
-        completedJob: {
-          job_id: postPatchComplete.details.job_id,
-          verdict: postPatchComplete.details.result?.verdict,
-          artifacts: postPatchComplete.details.result?.artifact_paths,
+        fakeFtpJob: {
+          job_id: fakeFtpComplete.details.job_id,
+          verdict: fakeFtpComplete.details.result?.verdict,
+          runner_kind: fakeFtpComplete.details.result?.runner_kind,
+          artifacts: fakeFtpComplete.details.result?.artifact_paths,
         },
         cancelledJob: {
           job_id: cancelled.details.job_id,
           state: cancelled.details.state,
+        },
+        staticSourceCancelledJob: {
+          job_id: staticCancelLaunch.details.job_id,
+          state: staticCancelledAfter.details.state,
+        },
+        staticSource: {
+          network_available: networkAvailable,
+          network_note: networkNote || undefined,
+          pre: {
+            job_id: preComplete.details.job_id,
+            state: preComplete.details.state,
+            verdict: preComplete.details.result?.verdict,
+            verdict_kind: preStatic.verdict_kind,
+            resolved_commit_hash: preStatic.resolved_commit_hash,
+            artifacts: preComplete.details.result?.artifact_paths,
+          },
+          post: {
+            job_id: postComplete.details.job_id,
+            state: postComplete.details.state,
+            verdict: postComplete.details.result?.verdict,
+            verdict_kind: postStatic.verdict_kind,
+            resolved_commit_hash: postStatic.resolved_commit_hash,
+            artifacts: postComplete.details.result?.artifact_paths,
+          },
         },
       },
       null,

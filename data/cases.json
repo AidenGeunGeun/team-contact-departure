@@ -2,13 +2,13 @@
   {
     "id": "mavlink-battery-status-bounds",
     "title": "MAVLink battery status parser bounds",
-    "short_description": "A curated parser-bounds case around battery/status telemetry frames.",
-    "source_citation": "Curated demo fixture derived from public MAVLink battery/status parser discussion, 2026-05-23.",
-    "target_family": "MAVLink telemetry parser",
+    "short_description": "Parser-bounds case backed by real PX4 source at pinned commits around the BATTERY_STATUS bounds fix.",
+    "source_citation": "Real PX4 source at the commits behind https://github.com/PX4/PX4-Autopilot/pull/18411 (BATTERY_STATUS out-of-bounds fix).",
+    "target_family": "MAVLink telemetry parser (PX4 mavlink_receiver.cpp::handle_message_battery_status)",
     "constraints": [
-      "Use fake runner evidence only for this milestone.",
-      "Do not infer real PX4 behavior from this fixture.",
-      "Treat pre-patch-demo and post-patch-demo commits as demo contrast strings."
+      "Evidence for this case is static-source only: real PX4 source at a pinned commit, no SITL, no fuzzing, no runtime replay.",
+      "Use the pinned aliases mavlink-battery-status-bounds-pre and mavlink-battery-status-bounds-post (or a real PX4 commit hash) as target_commit; the legacy pre-patch-demo/post-patch-demo strings are no longer supported for this case.",
+      "Treat the verdict as a structural observation about the source at the resolved commit, not a runtime safety judgment."
     ],
     "doc_snippet": "A supplier note claims a MAVLink battery/status parser now rejects malformed payload lengths before copying fields into the telemetry state. The public snippet says the fix should preserve normal BATTERY_STATUS handling while refusing frames whose declared extension fields exceed the parser buffer."
   },

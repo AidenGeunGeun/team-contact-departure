@@ -5,6 +5,13 @@ import { dirname, join, relative, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { loadCase, loadTestCard, type CuratedCase, type TestCard } from "./catalog.js";
+import {
+  loadStaticSourceConfig,
+  produceStaticSourceEvidence,
+  type StaticSourceConfig,
+  type StaticSourceOutcome,
+  type VerdictKind as StaticVerdictKind,
+} from "./static-source-evidence.js";
 
 export type JobState = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
@@ -53,6 +60,8 @@ export interface EvidenceSignal {
   interpretation: string;
 }
 
+export type RunnerKind = "fake-smoke" | "static-source-evidence";
+
 export interface EvidenceResult {
   job_id: string;
   state: JobState;
@@ -63,6 +72,30 @@ export interface EvidenceResult {
   artifact_paths: string[];
   cautions: string[];
   completed_at: string;
+  runner_kind?: RunnerKind;
+  static_source?: StaticSourceResultMetadata;
+}
+
+export interface StaticSourceResultMetadata {
+  case_id: string;
+  test_card_id: string;
+  target_commit: string;
+  resolved_commit_hash: string;
+  verdict_kind: StaticVerdictKind;
+  alias?: string;
+  pair_alias?: string;
+  role?: "pre-patch" | "post-patch";
+  target_file: string;
+  target_function: string;
+  source_region?: {
+    start_line: number;
+    end_line: number;
+  };
+  diff_pre_hash?: string;
+  diff_post_hash?: string;
+  diff_files_changed?: string[];
+  pr_url: string;
+  failure_stage?: string;
 }
 
 export interface JobRunnerProcessMetadata {
@@ -74,7 +107,7 @@ export interface JobRunnerProcessMetadata {
 }
 
 export interface JobRunnerMetadata {
-  type: "fake-smoke";
+  type: RunnerKind;
   expected_duration_ms: number;
   process?: JobRunnerProcessMetadata;
 }
@@ -118,13 +151,18 @@ interface JobRecord {
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const RUNS_ROOT = join(REPO_ROOT, "runs");
-const RUNNER_ENTRYPOINT = "src/runners/fake-evidence-runner.ts";
-const RUNNER_SCRIPT_PATH = fileURLToPath(new URL("../runners/fake-evidence-runner.ts", import.meta.url));
+const FAKE_RUNNER_ENTRYPOINT = "src/runners/fake-evidence-runner.ts";
+const FAKE_RUNNER_SCRIPT_PATH = fileURLToPath(new URL("../runners/fake-evidence-runner.ts", import.meta.url));
+const STATIC_SOURCE_RUNNER_ENTRYPOINT = "src/runners/static-source-evidence-runner.ts";
+const STATIC_SOURCE_RUNNER_SCRIPT_PATH = fileURLToPath(
+  new URL("../runners/static-source-evidence-runner.ts", import.meta.url),
+);
 const RUNNER_CANCEL_SIGNAL = "SIGTERM" as const;
 const JOB_LOCK_DIR_NAME = ".state-lock";
 const JOB_FILE_LOCK_TIMEOUT_MS = 5000;
 const JOB_FILE_LOCK_POLL_MS = 10;
 const FAKE_STEP_DELAY_MS = 250;
+const STATIC_SOURCE_EXPECTED_DURATION_MS = 120_000;
 const FAKE_STEPS = [
   {
     phase: "preparing-fixtures",
@@ -388,56 +426,7 @@ function buildEvidenceResult(record: JobRecord, completedAt: string): EvidenceRe
       artifact_paths: artifacts,
       cautions: ["Treat this as a smoke-test failure path only."],
       completed_at: completedAt,
-    };
-  }
-
-  if (caseId === "mavlink-battery-status-bounds" && targetCommit.includes("pre-patch-demo")) {
-    return {
-      job_id: record.job_id,
-      state: "succeeded",
-      verdict: "attention_required",
-      confidence: "medium",
-      summary: "The fake parser-bounds smoke found malformed battery/status frames that still reached the field-copy stage in the pre-patch demo target.",
-      evidence_signals: [
-        {
-          name: "malformed_frame_rejection",
-          value: false,
-          interpretation: "Pre-patch demo evidence is shaped to show the bounds fix is not present.",
-        },
-        {
-          name: "normal_frame_compatibility",
-          value: true,
-          interpretation: "Normal BATTERY_STATUS traffic still passes in the fake replay.",
-        },
-      ],
-      artifact_paths: artifacts,
-      cautions: ["Fake runner only; do not treat this as PX4/SITL evidence."],
-      completed_at: completedAt,
-    };
-  }
-
-  if (caseId === "mavlink-battery-status-bounds" && targetCommit.includes("post-patch-demo")) {
-    return {
-      job_id: record.job_id,
-      state: "succeeded",
-      verdict: "mitigation_observed",
-      confidence: "medium",
-      summary: "The fake parser-bounds smoke shows malformed battery/status frames rejected before field copy while normal frames still pass in the post-patch demo target.",
-      evidence_signals: [
-        {
-          name: "malformed_frame_rejection",
-          value: true,
-          interpretation: "Post-patch demo evidence is shaped to show the bounds fix is present.",
-        },
-        {
-          name: "normal_frame_compatibility",
-          value: true,
-          interpretation: "Normal BATTERY_STATUS traffic still passes in the fake replay.",
-        },
-      ],
-      artifact_paths: artifacts,
-      cautions: ["Fake runner only; do not treat this as PX4/SITL evidence."],
-      completed_at: completedAt,
+      runner_kind: "fake-smoke",
     };
   }
 
@@ -463,6 +452,7 @@ function buildEvidenceResult(record: JobRecord, completedAt: string): EvidenceRe
       artifact_paths: artifacts,
       cautions: ["Request a concrete message family, trigger, and pass/fail threshold before stronger testing."],
       completed_at: completedAt,
+      runner_kind: "fake-smoke",
     };
   }
 
@@ -492,6 +482,7 @@ function buildEvidenceResult(record: JobRecord, completedAt: string): EvidenceRe
     artifact_paths: artifacts,
     cautions: ["Fake runner only; no host filesystem access was performed."],
     completed_at: completedAt,
+    runner_kind: "fake-smoke",
   };
 }
 
@@ -536,17 +527,22 @@ async function writeArtifacts(record: JobRecord, result: EvidenceResult): Promis
   );
 }
 
-function buildCancelledResult(jobId: string, completedAt: string): EvidenceResult {
+function buildCancelledResult(
+  jobId: string,
+  completedAt: string,
+  runnerKind?: RunnerKind,
+): EvidenceResult {
   return {
     job_id: jobId,
     state: "cancelled",
     verdict: "cancelled",
     confidence: "low",
-    summary: "The fake evidence job was cancelled before it produced evidence.",
+    summary: "The evidence job was cancelled before it produced evidence.",
     evidence_signals: [],
     artifact_paths: [],
     cautions: ["No evidence conclusion is available for a cancelled job."],
     completed_at: completedAt,
+    runner_kind: runnerKind,
   };
 }
 
@@ -569,7 +565,10 @@ async function completeCancelled(
     });
     if (finalStatus.state === "cancelled") {
       const paths = jobPaths(jobId);
-      await writeJson(paths.resultPath, buildCancelledResult(jobId, finalStatus.finished_at ?? completedAt));
+      await writeJson(
+        paths.resultPath,
+        buildCancelledResult(jobId, finalStatus.finished_at ?? completedAt, finalStatus.runner?.type),
+      );
     }
     return finalStatus;
   });
@@ -601,7 +600,10 @@ async function completeWithResult(record: JobRecord, result: EvidenceResult): Pr
       message: result.state === "failed" ? result.summary : "Fake evidence job completed successfully.",
     });
     if (finalStatus.state === "cancelled" && finalStatus.state !== result.state) {
-      await writeJson(paths.resultPath, buildCancelledResult(record.job_id, finalStatus.finished_at ?? nowIso()));
+      await writeJson(
+        paths.resultPath,
+        buildCancelledResult(record.job_id, finalStatus.finished_at ?? nowIso(), finalStatus.runner?.type),
+      );
     }
     return finalStatus;
   });
@@ -615,16 +617,26 @@ async function completeFailedJob(jobId: string, message: string): Promise<JobSta
     }
     const failedAt = nowIso();
     const paths = jobPaths(jobId);
+    const runnerKind = current.runner?.type;
+    const summary =
+      runnerKind === "static-source-evidence"
+        ? `The static-source evidence runner failed: ${message}`
+        : `The fake evidence runner failed: ${message}`;
+    const cautions =
+      runnerKind === "static-source-evidence"
+        ? ["This is a static-source runner infrastructure failure, not firmware evidence."]
+        : ["This is a fake runner infrastructure failure, not firmware evidence."];
     const result: EvidenceResult = {
       job_id: jobId,
       state: "failed",
       verdict: "runner_failed",
       confidence: "low",
-      summary: `The fake evidence runner failed: ${message}`,
+      summary,
       evidence_signals: [],
       artifact_paths: [],
-      cautions: ["This is a fake runner infrastructure failure, not firmware evidence."],
+      cautions,
       completed_at: failedAt,
+      runner_kind: runnerKind,
     };
     await writeJson(paths.resultPath, result);
     const finalStatus = await updateStatusUnlocked(jobId, {
@@ -635,7 +647,10 @@ async function completeFailedJob(jobId: string, message: string): Promise<JobSta
       message: result.summary,
     });
     if (finalStatus.state === "cancelled") {
-      await writeJson(paths.resultPath, buildCancelledResult(jobId, finalStatus.finished_at ?? nowIso()));
+      await writeJson(
+        paths.resultPath,
+        buildCancelledResult(jobId, finalStatus.finished_at ?? nowIso(), finalStatus.runner?.type),
+      );
     }
     return finalStatus;
   });
@@ -647,14 +662,26 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-function installRunnerSignalHandlers(jobId: string): void {
+function installRunnerSignalHandlers(
+  jobId: string,
+  options: { kindLabel: string; onAbort?: () => void } = { kindLabel: "fake runner" },
+): void {
   let handlingSignal = false;
   const handleSignal = (signal: NodeJS.Signals) => {
     if (handlingSignal) {
       return;
     }
     handlingSignal = true;
-    void completeCancelled(jobId, `Cancellation requested; standalone fake runner received ${signal}.`)
+    try {
+      options.onAbort?.();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`Abort hook failed for ${jobId}: ${message}\n`);
+    }
+    void completeCancelled(
+      jobId,
+      `Cancellation requested; standalone ${options.kindLabel} received ${signal}.`,
+    )
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         process.stderr.write(`Failed to record cancellation for ${jobId}: ${message}\n`);
@@ -670,7 +697,7 @@ function installRunnerSignalHandlers(jobId: string): void {
 
 export async function runStandaloneFakeEvidenceJob(jobId: string): Promise<void> {
   assertSafeJobId(jobId);
-  installRunnerSignalHandlers(jobId);
+  installRunnerSignalHandlers(jobId, { kindLabel: "fake runner" });
   try {
     if (await shouldStopRunner(jobId)) {
       return;
@@ -716,6 +743,287 @@ export async function runStandaloneFakeEvidenceJob(jobId: string): Promise<void>
   }
 }
 
+function staticSourceArtifactPaths(
+  jobId: string,
+  outcome: StaticSourceOutcome,
+): string[] {
+  const paths = jobPaths(jobId);
+  const result: string[] = [
+    relativeToRepo(join(paths.artifactDirAbs, "source-context.md")),
+    relativeToRepo(join(paths.artifactDirAbs, "commit-info.json")),
+  ];
+  if (outcome.kind === "evidence") {
+    if (outcome.evidence.artifacts.diff_patch !== undefined) {
+      result.push(relativeToRepo(join(paths.artifactDirAbs, "diff.patch")));
+    }
+    if (outcome.evidence.artifacts.diff_summary_md !== undefined) {
+      result.push(relativeToRepo(join(paths.artifactDirAbs, "diff-summary.md")));
+    }
+  } else {
+    return [relativeToRepo(join(paths.artifactDirAbs, "failure.md"))];
+  }
+  return result;
+}
+
+async function writeStaticSourceArtifacts(
+  jobId: string,
+  outcome: StaticSourceOutcome,
+): Promise<void> {
+  const paths = jobPaths(jobId);
+  await mkdir(paths.artifactDirAbs, { recursive: true });
+  if (outcome.kind === "evidence") {
+    const artifacts = outcome.evidence.artifacts;
+    await writeFile(
+      join(paths.artifactDirAbs, "source-context.md"),
+      artifacts.source_context_md,
+      "utf8",
+    );
+    await writeJson(join(paths.artifactDirAbs, "commit-info.json"), artifacts.commit_info);
+    if (artifacts.diff_patch !== undefined) {
+      await writeFile(
+        join(paths.artifactDirAbs, "diff.patch"),
+        artifacts.diff_patch.endsWith("\n") ? artifacts.diff_patch : `${artifacts.diff_patch}\n`,
+        "utf8",
+      );
+    }
+    if (artifacts.diff_summary_md !== undefined) {
+      await writeFile(
+        join(paths.artifactDirAbs, "diff-summary.md"),
+        artifacts.diff_summary_md,
+        "utf8",
+      );
+    }
+  } else {
+    await writeFile(
+      join(paths.artifactDirAbs, "failure.md"),
+      outcome.failure.failure_md,
+      "utf8",
+    );
+  }
+}
+
+async function buildStaticSourceResult(
+  record: JobRecord,
+  outcome: StaticSourceOutcome,
+  completedAt: string,
+): Promise<EvidenceResult> {
+  const artifactList = staticSourceArtifactPaths(record.job_id, outcome);
+  const caseId = record.request.case_id;
+  const testCardId = record.request.test_card_id;
+  const targetCommit = record.request.target_commit;
+
+  if (outcome.kind === "failure") {
+    const failure = outcome.failure;
+    const config = await loadStaticSourceConfig().catch(() => undefined);
+    const caseConfig = config?.cases[caseId];
+    return {
+      job_id: record.job_id,
+      state: "failed",
+      verdict: "runner_failed",
+      confidence: "low",
+      summary: failure.summary,
+      evidence_signals: [
+        {
+          name: "static_source_runner_outcome",
+          value: failure.verdict_kind,
+          interpretation:
+            "Static-source runner could not produce evidence. The failure artifact records what was attempted.",
+        },
+      ],
+      artifact_paths: artifactList,
+      cautions: failure.caveats,
+      completed_at: completedAt,
+      runner_kind: "static-source-evidence",
+      static_source: {
+        case_id: caseId,
+        test_card_id: testCardId,
+        target_commit: targetCommit,
+        resolved_commit_hash: failure.resolved_commit_hash ?? targetCommit,
+        verdict_kind: failure.verdict_kind,
+        target_file: caseConfig?.target_file ?? "(unresolved)",
+        target_function: caseConfig?.target_function ?? "(unresolved)",
+        pr_url: caseConfig?.pr_url ?? "(unresolved)",
+        failure_stage: failure.stage,
+      },
+    };
+  }
+
+  const evidence = outcome.evidence;
+  const verdict =
+    evidence.verdict_kind === "static_evidence_consistent_with_claim"
+      ? "mitigation_observed"
+      : evidence.verdict_kind === "static_evidence_conflicts_with_claim"
+        ? "attention_required"
+        : "manual_review_needed";
+  const confidence = evidence.verdict_kind === "static_evidence_inconclusive" ? "low" : "medium";
+
+  const signals: EvidenceSignal[] = [
+    {
+      name: "static_source_verdict",
+      value: evidence.verdict_kind,
+      interpretation: evidence.summary,
+    },
+    {
+      name: "resolved_commit",
+      value: evidence.commit.hash,
+      interpretation: `Static evidence is anchored at PX4 commit ${evidence.commit.hash}.`,
+    },
+  ];
+  if (evidence.region) {
+    signals.push({
+      name: "target_source_region",
+      value: `${evidence.region.file_path}:${evidence.region.start_line}-${evidence.region.end_line}`,
+      interpretation: `Inspected ${evidence.region.function_name} at the resolved commit.`,
+    });
+  }
+  if (evidence.resolved.pair && evidence.artifacts.diff_patch !== undefined) {
+    signals.push({
+      name: "diff_pair",
+      value: `${evidence.resolved.pair.pre_hash.slice(0, 12)}..${evidence.resolved.pair.post_hash.slice(0, 12)}`,
+      interpretation: "Diff between the pre-patch parent and the post-patch fix is captured in artifacts/diff.patch.",
+    });
+  }
+
+  return {
+    job_id: record.job_id,
+    state: "succeeded",
+    verdict,
+    confidence,
+    summary: evidence.summary,
+    evidence_signals: signals,
+    artifact_paths: artifactList,
+    cautions: evidence.caveats,
+    completed_at: completedAt,
+    runner_kind: "static-source-evidence",
+    static_source: {
+      case_id: caseId,
+      test_card_id: testCardId,
+      target_commit: targetCommit,
+      resolved_commit_hash: evidence.commit.hash,
+      verdict_kind: evidence.verdict_kind,
+      alias: evidence.resolved.alias,
+      pair_alias:
+        evidence.resolved.role === "pre-patch"
+          ? evidence.resolved.pair?.post_alias
+          : evidence.resolved.pair?.pre_alias,
+      role: evidence.resolved.role,
+      target_file: evidence.resolved.case_config.target_file,
+      target_function: evidence.resolved.case_config.target_function,
+      source_region: evidence.region
+        ? { start_line: evidence.region.start_line, end_line: evidence.region.end_line }
+        : undefined,
+      diff_pre_hash: evidence.resolved.pair?.pre_hash,
+      diff_post_hash: evidence.resolved.pair?.post_hash,
+      diff_files_changed: evidence.diff_files_changed,
+      pr_url: evidence.resolved.case_config.pr_url,
+    },
+  };
+}
+
+async function completeWithStaticSourceOutcome(
+  record: JobRecord,
+  outcome: StaticSourceOutcome,
+): Promise<JobStatus> {
+  return withJobLock(record.job_id, async () => {
+    const current = await readStatus(record.job_id);
+    if (terminal(current.state)) {
+      return current;
+    }
+    await writeStaticSourceArtifacts(record.job_id, outcome);
+    const beforeResult = await readStatus(record.job_id);
+    if (terminal(beforeResult.state)) {
+      return beforeResult;
+    }
+    const completedAt = nowIso();
+    const result = await buildStaticSourceResult(record, outcome, completedAt);
+    const paths = jobPaths(record.job_id);
+    await writeJson(paths.resultPath, result);
+    const finalStatus = await updateStatusUnlocked(record.job_id, {
+      state: result.state,
+      phase: result.state === "failed" ? "failed" : "complete",
+      progress: 100,
+      finished_at: result.completed_at,
+      message:
+        result.state === "failed"
+          ? result.summary
+          : "Static-source evidence job completed.",
+    });
+    if (finalStatus.state === "cancelled" && finalStatus.state !== result.state) {
+      await writeJson(
+        paths.resultPath,
+        buildCancelledResult(record.job_id, finalStatus.finished_at ?? nowIso(), finalStatus.runner?.type),
+      );
+    }
+    return finalStatus;
+  });
+}
+
+// Cancellation note: the signal handler installed below writes the cancelled
+// result.json and exits via process.exit(0). The main flow also aborts its
+// in-flight git work via the AbortController. The completion path checks for
+// a terminal state both before writing artifacts and before overwriting
+// result.json, so a SIGTERM landing late in the work still leaves the job in
+// `cancelled` rather than `failed` in the common case. A worst-case race
+// (signal lands exactly between the final terminal check and the result write)
+// remains documented as a PoC limitation, matching the fake runner's behavior.
+export async function runStandaloneStaticSourceEvidenceJob(jobId: string): Promise<void> {
+  assertSafeJobId(jobId);
+  const controller = new AbortController();
+  installRunnerSignalHandlers(jobId, {
+    kindLabel: "static-source runner",
+    onAbort: () => controller.abort(),
+  });
+  try {
+    if (await shouldStopRunner(jobId)) {
+      return;
+    }
+    const startedStatus = await updateStatus(jobId, {
+      state: "running",
+      phase: "starting",
+      progress: 5,
+      started_at: nowIso(),
+      message: "Standalone static-source runner process started.",
+    });
+    if (terminal(startedStatus.state)) {
+      return;
+    }
+
+    const record = await readJobRecord(jobId);
+    const outcome = await produceStaticSourceEvidence({
+      case_id: record.request.case_id,
+      test_card_id: record.request.test_card_id,
+      target_commit: record.request.target_commit,
+      signal: controller.signal,
+      onProgress: async (phase, progress, message) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (await shouldStopRunner(jobId)) {
+          return;
+        }
+        await updateStatus(jobId, {
+          state: "running",
+          phase,
+          progress,
+          message,
+        });
+      },
+    });
+
+    if (await shouldStopRunner(jobId)) {
+      return;
+    }
+    await completeWithStaticSourceOutcome(record, outcome);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      // Cancellation path already writes the cancelled result.
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    await completeFailedJob(jobId, message);
+  }
+}
+
 function runnerEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of ["PATH", "TMPDIR", "TEMP", "TMP", "NODE_ENV"] as const) {
@@ -728,8 +1036,32 @@ function runnerEnvironment(): NodeJS.ProcessEnv {
   return env;
 }
 
-function launchStandaloneRunner(jobId: string): JobRunnerProcessMetadata {
-  const runnerArgs = ["--import", "tsx", RUNNER_SCRIPT_PATH, jobId];
+interface RunnerLaunchPlan {
+  kind: RunnerKind;
+  entrypoint: string;
+  scriptPath: string;
+  expectedDurationMs: number;
+}
+
+function chooseRunnerLaunchPlan(caseId: string, staticConfig: StaticSourceConfig): RunnerLaunchPlan {
+  if (Object.prototype.hasOwnProperty.call(staticConfig.cases, caseId)) {
+    return {
+      kind: "static-source-evidence",
+      entrypoint: STATIC_SOURCE_RUNNER_ENTRYPOINT,
+      scriptPath: STATIC_SOURCE_RUNNER_SCRIPT_PATH,
+      expectedDurationMs: STATIC_SOURCE_EXPECTED_DURATION_MS,
+    };
+  }
+  return {
+    kind: "fake-smoke",
+    entrypoint: FAKE_RUNNER_ENTRYPOINT,
+    scriptPath: FAKE_RUNNER_SCRIPT_PATH,
+    expectedDurationMs: FAKE_STEP_DELAY_MS * FAKE_STEPS.length,
+  };
+}
+
+function launchStandaloneRunner(jobId: string, plan: RunnerLaunchPlan): JobRunnerProcessMetadata {
+  const runnerArgs = ["--import", "tsx", plan.scriptPath, jobId];
   const child = spawn(process.execPath, runnerArgs, {
     cwd: REPO_ROOT,
     detached: true,
@@ -738,14 +1070,14 @@ function launchStandaloneRunner(jobId: string): JobRunnerProcessMetadata {
   });
 
   if (!child.pid) {
-    throw new Error("Standalone fake runner process did not report a pid.");
+    throw new Error(`Standalone runner process did not report a pid (kind=${plan.kind}).`);
   }
 
   child.unref();
   return {
     pid: child.pid,
     launched_at: nowIso(),
-    entrypoint: RUNNER_ENTRYPOINT,
+    entrypoint: plan.entrypoint,
     detached: true,
     cancel_signal: RUNNER_CANCEL_SIGNAL,
   };
@@ -781,24 +1113,26 @@ function signalRunnerProcess(status: JobStatus): RunnerSignalResult {
     };
   }
 
+  const runnerLabel =
+    status.runner?.type === "static-source-evidence" ? "static-source runner" : "fake runner";
   try {
     process.kill(pid, RUNNER_CANCEL_SIGNAL);
     return {
       outcome: "sent",
-      message: `Cancellation requested; sent ${RUNNER_CANCEL_SIGNAL} to standalone fake runner pid ${pid}.`,
+      message: `Cancellation requested; sent ${RUNNER_CANCEL_SIGNAL} to standalone ${runnerLabel} pid ${pid}.`,
     };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ESRCH") {
       return {
         outcome: "already_exited",
-        message: "Cancellation requested; standalone fake runner process was already gone.",
+        message: `Cancellation requested; standalone ${runnerLabel} process was already gone.`,
       };
     }
     const message = error instanceof Error ? error.message : String(error);
     return {
       outcome: "signal_failed",
-      message: `Cancellation requested; failed to signal standalone fake runner: ${message}`,
+      message: `Cancellation requested; failed to signal standalone ${runnerLabel}: ${message}`,
     };
   }
 }
@@ -808,10 +1142,12 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
     throw new Error("target_commit must be a non-empty string.");
   }
 
-  const [resolvedCase, resolvedTestCard] = await Promise.all([
+  const [resolvedCase, resolvedTestCard, staticConfig] = await Promise.all([
     loadCase(params.case_id),
     loadTestCard(params.test_card_id),
+    loadStaticSourceConfig(),
   ]);
+  const plan = chooseRunnerLaunchPlan(params.case_id, staticConfig);
   const jobId = createJobId();
   const paths = jobPaths(jobId);
   const launchedAt = nowIso();
@@ -828,10 +1164,13 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
     resolved_case: resolvedCase,
     resolved_test_card: resolvedTestCard,
     runner: {
-      type: "fake-smoke",
-      expected_duration_ms: FAKE_STEP_DELAY_MS * FAKE_STEPS.length,
+      type: plan.kind,
+      expected_duration_ms: plan.expectedDurationMs,
     },
   };
+  const queueMessage = plan.kind === "static-source-evidence"
+    ? "Static-source evidence job queued."
+    : "Fake evidence job queued.";
   const status: JobStatus = {
     job_id: jobId,
     state: "queued",
@@ -842,7 +1181,7 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
     run_dir: paths.runDir,
     artifact_dir: paths.artifactDir,
     runner: record.runner,
-    message: "Fake evidence job queued.",
+    message: queueMessage,
   };
 
   await mkdir(paths.artifactDirAbs, { recursive: true });
@@ -856,7 +1195,7 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
     message: status.message,
   });
 
-  const runnerProcess = launchStandaloneRunner(jobId);
+  const runnerProcess = launchStandaloneRunner(jobId, plan);
   const runner = {
     ...record.runner,
     process: runnerProcess,

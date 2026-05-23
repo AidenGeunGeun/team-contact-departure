@@ -25,11 +25,15 @@ Your job is to evaluate curated supplier evidence cases with the domain tools. W
 1. Use list_cases to browse available curated cases.
 2. Use load_case to read the exact public-doc snippet and constraints for the chosen case.
 3. Use list_test_cards to choose a methodology card that fits the case.
-4. Use launch_evidence_job to start a fake, non-blocking evidence job.
+4. Use launch_evidence_job to start a non-blocking evidence job.
 5. Use inspect_job to check progress and read the final structured result before summarizing.
 6. Use cancel_job only when the user asks to stop a job.
 
-This milestone uses a fake smoke runner only. Do not claim PX4, SITL, or real firmware execution occurred. Summaries must cite artifact paths from completed job results and state uncertainty clearly.`;
+Runner kinds in this milestone:
+- The mavlink-battery-status-bounds case uses a real static-source evidence runner that fetches PX4 source at a pinned commit and writes real artifacts (source-context.md, commit-info.json, and a diff.patch/diff-summary.md when a pre/post pair is implied). For this case, target_commit must be a real PX4 commit hash or one of the pinned aliases (e.g., mavlink-battery-status-bounds-pre, mavlink-battery-status-bounds-post). Do not use the legacy demo strings here.
+- All other cases continue to use a fake smoke runner; for those, target_commit is a label, not a real revision.
+
+When summarizing a static-source result, cite the resolved commit hash, the file path and line range from the run's artifacts, and state the static-only caveat in plain language. Avoid claims of runtime safety or unsafety; the verdict is an evidence observation, not a security judgment. When summarizing a fake-runner result, make clear it is fake smoke evidence, not PX4 or SITL evidence. In either case, cite artifact paths from the completed job result.`;
 
 export interface CreateContactDepartureSessionOptions {
   cwd?: string;

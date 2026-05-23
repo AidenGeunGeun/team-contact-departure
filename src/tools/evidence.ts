@@ -136,6 +136,25 @@ function formatInspection(details: JobInspectionDetails): string {
 
   if (details.result) {
     lines.push(`Verdict: ${details.result.verdict} (${details.result.confidence} confidence).`);
+    if (details.result.runner_kind) {
+      lines.push(`Runner kind: ${details.result.runner_kind}`);
+    }
+    if (details.result.static_source) {
+      const ss = details.result.static_source;
+      lines.push(`Static-source verdict_kind: ${ss.verdict_kind}`);
+      lines.push(`Resolved commit hash: ${ss.resolved_commit_hash}`);
+      lines.push(`Inspected file: ${ss.target_file}`);
+      lines.push(`Inspected function: ${ss.target_function}`);
+      if (ss.source_region) {
+        lines.push(`Inspected line range: ${ss.source_region.start_line}-${ss.source_region.end_line}`);
+      }
+      if (ss.diff_pre_hash && ss.diff_post_hash) {
+        lines.push(`Diff pair: ${ss.diff_pre_hash} -> ${ss.diff_post_hash}`);
+      }
+      if (ss.pr_url) {
+        lines.push(`Reference PR: ${ss.pr_url}`);
+      }
+    }
     lines.push(`Summary: ${details.result.summary}`);
     if (details.result.artifact_paths.length > 0) {
       lines.push("Artifact paths:");

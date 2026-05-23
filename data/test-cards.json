@@ -1,13 +1,13 @@
 [
   {
     "id": "mavlink-parser-bounds",
-    "title": "MAVLink parser bounds smoke",
-    "plain_language_use": "Use this when the claim is about rejecting malformed MAVLink telemetry without breaking normal messages.",
-    "conceptual_run": "Replay a small mix of normal and malformed telemetry frames through a fake parser harness and compare accepted versus rejected frames.",
+    "title": "MAVLink parser bounds static-source check",
+    "plain_language_use": "Use this when the claim is about a MAVLink parser bounds check that should already be visible in the source at the supplier's pinned commit.",
+    "conceptual_run": "Resolve target_commit to a real PX4 commit, fetch the BATTERY_STATUS handler source at that commit, inspect the cell-count loop, and produce a static-source verdict (consistent / conflicts / inconclusive / unavailable) with a code snippet and, when a pre/post pair is implied, a unified diff.",
     "evidence_signals": [
-      "malformed frames are rejected before field copy",
-      "normal BATTERY_STATUS frames still pass",
-      "the result distinguishes pre-patch-demo and post-patch-demo commits"
+      "the bounds guard appears before the array dereference in the BATTERY_STATUS while-loop at the resolved commit",
+      "the resolved commit hash and parent are recorded in artifacts/commit-info.json",
+      "a unified diff between the pre-patch and post-patch commits is captured when the alias pair is supplied"
     ]
   },
   {
