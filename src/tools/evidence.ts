@@ -101,7 +101,7 @@ function formatTestCards(cards: TestCard[]): string {
 
 function formatLaunch(details: JobLaunchDetails): string {
   const lines = [
-    `Launched fake evidence job ${details.job_id}.`,
+    `Launched evidence job ${details.job_id}.`,
     `Initial state: ${details.state} (${details.phase}, ${details.progress}%).`,
     `Run folder: ${details.run_dir}`,
     `Artifact folder: ${details.artifact_dir}`,
@@ -247,8 +247,8 @@ export const listTestCardsTool = defineTool<typeof emptySchema, ListTestCardsDet
 export const launchEvidenceJobTool = defineTool<typeof launchEvidenceJobSchema, JobLaunchDetails>({
   name: "launch_evidence_job",
   label: "launch evidence job",
-  description: "Launch a non-blocking fake evidence job for a curated case and test card.",
-  promptSnippet: "Start a fake evidence job and keep the returned job_id for inspection or cancellation.",
+  description: "Launch a non-blocking evidence job for a curated case and test card. The selected case decides whether the runner is real static-source evidence or fake smoke evidence.",
+  promptSnippet: "Start an evidence job and keep the returned job_id for inspection or cancellation.",
   parameters: launchEvidenceJobSchema,
   executionMode: "parallel",
   async execute(_toolCallId, params) {
@@ -259,7 +259,7 @@ export const launchEvidenceJobTool = defineTool<typeof launchEvidenceJobSchema, 
 export const inspectJobTool = defineTool<typeof jobIdSchema, JobInspectionDetails>({
   name: "inspect_job",
   label: "inspect job",
-  description: "Inspect a fake evidence job's lifecycle state, progress, recent events, result, and artifact paths.",
+  description: "Inspect an evidence job's lifecycle state, progress, recent events, result, runner kind, and artifact paths.",
   promptSnippet: "Poll a launched job until it reaches a terminal state before summarizing evidence.",
   parameters: jobIdSchema,
   executionMode: "parallel",
@@ -271,8 +271,8 @@ export const inspectJobTool = defineTool<typeof jobIdSchema, JobInspectionDetail
 export const cancelJobTool = defineTool<typeof jobIdSchema, JobCancellationDetails>({
   name: "cancel_job",
   label: "cancel job",
-  description: "Cancel a running or queued fake evidence job and report its final state.",
-  promptSnippet: "Cancel a launched fake evidence job when the user asks to stop it.",
+  description: "Cancel a running or queued evidence job and report its final state.",
+  promptSnippet: "Cancel a launched evidence job when the user asks to stop it.",
   parameters: jobIdSchema,
   executionMode: "parallel",
   async execute(_toolCallId, params) {
