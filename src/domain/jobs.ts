@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile, appendFile, rename } from "node:fs/promises";
+import { mkdir, readFile, writeFile, appendFile, rename, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { dirname, join, relative, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -34,6 +35,7 @@ export interface JobStatus {
   cancelled_at?: string;
   run_dir: string;
   artifact_dir: string;
+  runner?: JobRunnerMetadata;
   message: string;
 }
 
@@ -63,6 +65,20 @@ export interface EvidenceResult {
   completed_at: string;
 }
 
+export interface JobRunnerProcessMetadata {
+  pid: number;
+  launched_at: string;
+  entrypoint: string;
+  detached: boolean;
+  cancel_signal: "SIGTERM";
+}
+
+export interface JobRunnerMetadata {
+  type: "fake-smoke";
+  expected_duration_ms: number;
+  process?: JobRunnerProcessMetadata;
+}
+
 export interface JobLaunchDetails {
   job_id: string;
   state: JobState;
@@ -70,6 +86,7 @@ export interface JobLaunchDetails {
   progress: number;
   run_dir: string;
   artifact_dir: string;
+  runner?: JobRunnerMetadata;
 }
 
 export interface JobInspectionDetails {
@@ -82,6 +99,7 @@ export interface JobInspectionDetails {
   recent_events: JobEvent[];
   result?: EvidenceResult;
   artifact_paths?: string[];
+  runner?: JobRunnerMetadata;
   message: string;
 }
 
@@ -95,18 +113,17 @@ interface JobRecord {
   request: Required<LaunchEvidenceJobInput>;
   resolved_case: CuratedCase;
   resolved_test_card: TestCard;
-  runner: {
-    type: "fake-smoke";
-    expected_duration_ms: number;
-  };
-}
-
-interface ActiveJobHandle {
-  cancelRequested: boolean;
+  runner: JobRunnerMetadata;
 }
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const RUNS_ROOT = join(REPO_ROOT, "runs");
+const RUNNER_ENTRYPOINT = "src/runners/fake-evidence-runner.ts";
+const RUNNER_SCRIPT_PATH = fileURLToPath(new URL("../runners/fake-evidence-runner.ts", import.meta.url));
+const RUNNER_CANCEL_SIGNAL = "SIGTERM" as const;
+const JOB_LOCK_DIR_NAME = ".state-lock";
+const JOB_FILE_LOCK_TIMEOUT_MS = 5000;
+const JOB_FILE_LOCK_POLL_MS = 10;
 const FAKE_STEP_DELAY_MS = 250;
 const FAKE_STEPS = [
   {
@@ -131,7 +148,6 @@ const FAKE_STEPS = [
   },
 ] as const;
 
-const activeJobs = new Map<string, ActiveJobHandle>();
 const jobLocks = new Map<string, Promise<void>>();
 
 function nowIso(): string {
@@ -209,6 +225,48 @@ async function readStatus(jobId: string): Promise<JobStatus> {
   return readJson<JobStatus>(paths.statusPath);
 }
 
+async function acquireJobFileLock(jobId: string): Promise<() => Promise<void>> {
+  const paths = jobPaths(jobId);
+  const lockDir = join(paths.runDirAbs, JOB_LOCK_DIR_NAME);
+  const deadline = Date.now() + JOB_FILE_LOCK_TIMEOUT_MS;
+
+  while (true) {
+    try {
+      await mkdir(lockDir);
+      try {
+        await writeJson(join(lockDir, "owner.json"), {
+          pid: process.pid,
+          acquired_at: nowIso(),
+        });
+      } catch (error) {
+        await rm(lockDir, { recursive: true, force: true });
+        throw error;
+      }
+      return async () => {
+        await rm(lockDir, { recursive: true, force: true });
+      };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") {
+        throw error;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for job state lock for ${jobId}.`);
+      }
+      await delay(JOB_FILE_LOCK_POLL_MS);
+    }
+  }
+}
+
+async function withJobFileLock<T>(jobId: string, action: () => Promise<T>): Promise<T> {
+  const release = await acquireJobFileLock(jobId);
+  try {
+    return await action();
+  } finally {
+    await release();
+  }
+}
+
 async function withJobLock<T>(jobId: string, action: () => Promise<T>): Promise<T> {
   const previous = jobLocks.get(jobId) ?? Promise.resolve();
   let release: () => void = () => {};
@@ -219,7 +277,7 @@ async function withJobLock<T>(jobId: string, action: () => Promise<T>): Promise<
   jobLocks.set(jobId, chain);
   await previous.catch(() => undefined);
   try {
-    return await action();
+    return await withJobFileLock(jobId, action);
   } finally {
     release();
     if (jobLocks.get(jobId) === chain) {
@@ -478,47 +536,48 @@ async function writeArtifacts(record: JobRecord, result: EvidenceResult): Promis
   );
 }
 
-async function completeCancelled(jobId: string): Promise<JobStatus> {
+function buildCancelledResult(jobId: string, completedAt: string): EvidenceResult {
+  return {
+    job_id: jobId,
+    state: "cancelled",
+    verdict: "cancelled",
+    confidence: "low",
+    summary: "The fake evidence job was cancelled before it produced evidence.",
+    evidence_signals: [],
+    artifact_paths: [],
+    cautions: ["No evidence conclusion is available for a cancelled job."],
+    completed_at: completedAt,
+  };
+}
+
+async function completeCancelled(
+  jobId: string,
+  message = "Cancellation requested; standalone fake runner stopped before completion.",
+): Promise<JobStatus> {
   return withJobLock(jobId, async () => {
     const current = await readStatus(jobId);
     if (terminal(current.state)) {
       return current;
     }
-    const active = activeJobs.get(jobId);
-    if (active) {
-      active.cancelRequested = true;
-    }
     const completedAt = nowIso();
-    const result: EvidenceResult = {
-      job_id: jobId,
-      state: "cancelled",
-      verdict: "cancelled",
-      confidence: "low",
-      summary: "The fake evidence job was cancelled before it produced evidence.",
-      evidence_signals: [],
-      artifact_paths: [],
-      cautions: ["No evidence conclusion is available for a cancelled job."],
-      completed_at: completedAt,
-    };
-    const paths = jobPaths(jobId);
-    await writeJson(paths.resultPath, result);
-    return updateStatusUnlocked(jobId, {
+    const finalStatus = await updateStatusUnlocked(jobId, {
       state: "cancelled",
       phase: "cancelled",
       finished_at: completedAt,
       cancelled_at: completedAt,
-      message: "Cancellation requested; fake runner stopped before completion.",
+      message,
     });
+    if (finalStatus.state === "cancelled") {
+      const paths = jobPaths(jobId);
+      await writeJson(paths.resultPath, buildCancelledResult(jobId, finalStatus.finished_at ?? completedAt));
+    }
+    return finalStatus;
   });
 }
 
-async function isCancelled(jobId: string, handle: ActiveJobHandle): Promise<boolean> {
-  if (handle.cancelRequested) {
-    await completeCancelled(jobId);
-    return true;
-  }
+async function shouldStopRunner(jobId: string): Promise<boolean> {
   const status = await readStatus(jobId);
-  return status.state === "cancelled";
+  return terminal(status.state);
 }
 
 async function completeWithResult(record: JobRecord, result: EvidenceResult): Promise<JobStatus> {
@@ -528,15 +587,23 @@ async function completeWithResult(record: JobRecord, result: EvidenceResult): Pr
       return current;
     }
     await writeArtifacts(record, result);
+    const beforeResult = await readStatus(record.job_id);
+    if (terminal(beforeResult.state)) {
+      return beforeResult;
+    }
     const paths = jobPaths(record.job_id);
     await writeJson(paths.resultPath, result);
-    return updateStatusUnlocked(record.job_id, {
+    const finalStatus = await updateStatusUnlocked(record.job_id, {
       state: result.state,
       phase: result.state === "failed" ? "failed" : "complete",
       progress: 100,
       finished_at: result.completed_at,
       message: result.state === "failed" ? result.summary : "Fake evidence job completed successfully.",
     });
+    if (finalStatus.state === "cancelled" && finalStatus.state !== result.state) {
+      await writeJson(paths.resultPath, buildCancelledResult(record.job_id, finalStatus.finished_at ?? nowIso()));
+    }
+    return finalStatus;
   });
 }
 
@@ -560,13 +627,17 @@ async function completeFailedJob(jobId: string, message: string): Promise<JobSta
       completed_at: failedAt,
     };
     await writeJson(paths.resultPath, result);
-    return updateStatusUnlocked(jobId, {
+    const finalStatus = await updateStatusUnlocked(jobId, {
       state: "failed",
       phase: "failed",
       progress: 100,
       finished_at: failedAt,
       message: result.summary,
     });
+    if (finalStatus.state === "cancelled") {
+      await writeJson(paths.resultPath, buildCancelledResult(jobId, finalStatus.finished_at ?? nowIso()));
+    }
+    return finalStatus;
   });
 }
 
@@ -576,33 +647,62 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-async function runFakeJob(jobId: string, handle: ActiveJobHandle): Promise<void> {
-  try {
-    if (await isCancelled(jobId, handle)) {
+function installRunnerSignalHandlers(jobId: string): void {
+  let handlingSignal = false;
+  const handleSignal = (signal: NodeJS.Signals) => {
+    if (handlingSignal) {
       return;
     }
-    await updateStatus(jobId, {
+    handlingSignal = true;
+    void completeCancelled(jobId, `Cancellation requested; standalone fake runner received ${signal}.`)
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`Failed to record cancellation for ${jobId}: ${message}\n`);
+      })
+      .finally(() => {
+        process.exit(0);
+      });
+  };
+
+  process.once("SIGTERM", handleSignal);
+  process.once("SIGINT", handleSignal);
+}
+
+export async function runStandaloneFakeEvidenceJob(jobId: string): Promise<void> {
+  assertSafeJobId(jobId);
+  installRunnerSignalHandlers(jobId);
+  try {
+    if (await shouldStopRunner(jobId)) {
+      return;
+    }
+    const startedStatus = await updateStatus(jobId, {
       state: "running",
       phase: "starting",
       progress: 5,
       started_at: nowIso(),
-      message: "Fake runner started.",
+      message: "Standalone fake runner process started.",
     });
+    if (terminal(startedStatus.state)) {
+      return;
+    }
 
     for (const step of FAKE_STEPS) {
       await delay(FAKE_STEP_DELAY_MS);
-      if (await isCancelled(jobId, handle)) {
+      if (await shouldStopRunner(jobId)) {
         return;
       }
-      await updateStatus(jobId, {
+      const stepStatus = await updateStatus(jobId, {
         state: "running",
         phase: step.phase,
         progress: step.progress,
         message: step.message,
       });
+      if (terminal(stepStatus.state)) {
+        return;
+      }
     }
 
-    if (await isCancelled(jobId, handle)) {
+    if (await shouldStopRunner(jobId)) {
       return;
     }
 
@@ -613,8 +713,93 @@ async function runFakeJob(jobId: string, handle: ActiveJobHandle): Promise<void>
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await completeFailedJob(jobId, message);
-  } finally {
-    activeJobs.delete(jobId);
+  }
+}
+
+function runnerEnvironment(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of ["PATH", "TMPDIR", "TEMP", "TMP", "NODE_ENV"] as const) {
+    const value = process.env[key];
+    if (value) {
+      env[key] = value;
+    }
+  }
+  env.NODE_ENV ??= "test";
+  return env;
+}
+
+function launchStandaloneRunner(jobId: string): JobRunnerProcessMetadata {
+  const runnerArgs = ["--import", "tsx", RUNNER_SCRIPT_PATH, jobId];
+  const child = spawn(process.execPath, runnerArgs, {
+    cwd: REPO_ROOT,
+    detached: true,
+    env: runnerEnvironment(),
+    stdio: "ignore",
+  });
+
+  if (!child.pid) {
+    throw new Error("Standalone fake runner process did not report a pid.");
+  }
+
+  child.unref();
+  return {
+    pid: child.pid,
+    launched_at: nowIso(),
+    entrypoint: RUNNER_ENTRYPOINT,
+    detached: true,
+    cancel_signal: RUNNER_CANCEL_SIGNAL,
+  };
+}
+
+async function writeRunnerProcessMetadata(
+  status: JobStatus,
+  runner: JobRunnerMetadata,
+): Promise<JobStatus> {
+  return withJobLock(status.job_id, async () => {
+    const current = await readStatus(status.job_id).catch(() => status);
+    const updated: JobStatus = {
+      ...current,
+      runner,
+      updated_at: nowIso(),
+    };
+    await writeStatus(updated);
+    return updated;
+  });
+}
+
+interface RunnerSignalResult {
+  outcome: "sent" | "missing_process_metadata" | "already_exited" | "signal_failed";
+  message: string;
+}
+
+function signalRunnerProcess(status: JobStatus): RunnerSignalResult {
+  const pid = status.runner?.process?.pid;
+  if (!pid || !Number.isInteger(pid) || pid <= 0) {
+    return {
+      outcome: "missing_process_metadata",
+      message: "Cancellation requested; no standalone runner pid was recorded.",
+    };
+  }
+
+  try {
+    process.kill(pid, RUNNER_CANCEL_SIGNAL);
+    return {
+      outcome: "sent",
+      message: `Cancellation requested; sent ${RUNNER_CANCEL_SIGNAL} to standalone fake runner pid ${pid}.`,
+    };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") {
+      return {
+        outcome: "already_exited",
+        message: "Cancellation requested; standalone fake runner process was already gone.",
+      };
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      outcome: "signal_failed",
+      message: `Cancellation requested; failed to signal standalone fake runner: ${message}`,
+    };
   }
 }
 
@@ -656,6 +841,7 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
     updated_at: launchedAt,
     run_dir: paths.runDir,
     artifact_dir: paths.artifactDir,
+    runner: record.runner,
     message: "Fake evidence job queued.",
   };
 
@@ -670,11 +856,12 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
     message: status.message,
   });
 
-  const handle: ActiveJobHandle = { cancelRequested: false };
-  activeJobs.set(jobId, handle);
-  setTimeout(() => {
-    void runFakeJob(jobId, handle);
-  }, 0);
+  const runnerProcess = launchStandaloneRunner(jobId);
+  const runner = {
+    ...record.runner,
+    process: runnerProcess,
+  };
+  await writeRunnerProcessMetadata(status, runner);
 
   return {
     job_id: jobId,
@@ -683,6 +870,7 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
     progress: status.progress,
     run_dir: status.run_dir,
     artifact_dir: status.artifact_dir,
+    runner,
   };
 }
 
@@ -700,6 +888,7 @@ export async function inspectJob(params: InspectJobInput): Promise<JobInspection
     recent_events: recentEvents,
     result,
     artifact_paths: result?.artifact_paths,
+    runner: status.runner,
     message: status.message,
   };
 }
@@ -715,7 +904,8 @@ export async function cancelJob(params: CancelJobInput): Promise<JobCancellation
     };
   }
 
-  const cancellationStatus = await completeCancelled(params.job_id);
+  const signalResult = signalRunnerProcess(status);
+  const cancellationStatus = await completeCancelled(params.job_id, signalResult.message);
   const inspected = await inspectJob(params);
   const cancelAction = cancellationStatus.state === "cancelled" ? "cancelled" : "already_terminal";
   return {

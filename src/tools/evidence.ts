@@ -100,13 +100,17 @@ function formatTestCards(cards: TestCard[]): string {
 }
 
 function formatLaunch(details: JobLaunchDetails): string {
-  return [
+  const lines = [
     `Launched fake evidence job ${details.job_id}.`,
     `Initial state: ${details.state} (${details.phase}, ${details.progress}%).`,
     `Run folder: ${details.run_dir}`,
     `Artifact folder: ${details.artifact_dir}`,
-    "Use inspect_job with the job_id to view progress and results.",
-  ].join("\n");
+  ];
+  if (details.runner?.process) {
+    lines.push(`Runner process: pid ${details.runner.process.pid} (${details.runner.process.entrypoint}).`);
+  }
+  lines.push("Use inspect_job with the job_id to view progress and results.");
+  return lines.join("\n");
 }
 
 function formatInspection(details: JobInspectionDetails): string {
@@ -116,6 +120,10 @@ function formatInspection(details: JobInspectionDetails): string {
     `Run folder: ${details.run_dir}`,
     `Artifact folder: ${details.artifact_dir}`,
   ];
+
+  if (details.runner?.process) {
+    lines.push(`Runner process: pid ${details.runner.process.pid} (${details.runner.process.entrypoint}).`);
+  }
 
   if (details.recent_events.length > 0) {
     lines.push("Recent events:");
