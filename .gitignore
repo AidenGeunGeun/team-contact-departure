@@ -50,6 +50,7 @@ logs/
 # Demonstration bundles intended for the repo go under demo/ or examples/
 # and are tracked explicitly.
 /runs/
+/agent-runs/
 /tmp/
 /cache/
 /.cache/

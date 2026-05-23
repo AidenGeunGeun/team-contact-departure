@@ -109,6 +109,9 @@ function runnerLabel(runnerKind) {
   if (runnerKind === "static-source-evidence") {
     return "static PX4 source evidence";
   }
+  if (runnerKind === "mavlink-parser-fuzz") {
+    return "MAVLink parser library fuzz";
+  }
   return text(runnerKind, "unknown runner");
 }
 
@@ -118,6 +121,9 @@ function runnerClass(runnerKind) {
   }
   if (runnerKind === "static-source-evidence") {
     return "runner-pill static";
+  }
+  if (runnerKind === "mavlink-parser-fuzz") {
+    return "runner-pill fuzz";
   }
   return "runner-pill";
 }
@@ -233,6 +239,9 @@ function renderCaveats(detail) {
   }
   if (detail.runner_kind === "static-source-evidence") {
     caveats.push("Static-source evidence only. No SITL, fuzzing, or MAVLink replay was performed by this viewer.");
+  }
+  if (detail.runner_kind === "mavlink-parser-fuzz") {
+    caveats.push("Parser-library evidence only. This job used pymavlink on mutated frames; it is not PX4 SITL or firmware runtime proof.");
   }
   for (const caution of detail.result?.cautions || []) {
     if (!caveats.includes(caution)) {

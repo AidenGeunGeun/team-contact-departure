@@ -24,7 +24,7 @@ const launchEvidenceJobSchema = Type.Object({
   case_id: Type.String({ description: "Curated case id returned by list_cases." }),
   test_card_id: Type.String({ description: "Test card id returned by list_test_cards." }),
   target_commit: Type.String({ description: "Target commit, branch, or demo string to evaluate." }),
-  budget_profile: Type.Optional(Type.String({ description: "Optional fake-runner budget label. Defaults to smoke-fast." })),
+  budget_profile: Type.Optional(Type.String({ description: "Optional runner budget label (for example smoke-fast). Defaults to smoke-fast." })),
 });
 
 const jobIdSchema = Type.Object({

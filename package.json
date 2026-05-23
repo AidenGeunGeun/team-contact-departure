@@ -11,6 +11,9 @@
     "typecheck": "tsc --noEmit",
     "smoke:offline": "tsx scripts/smoke-offline.ts",
     "smoke:agent": "tsx scripts/smoke-agent.ts",
+    "smoke:operator": "tsx scripts/smoke-operator.ts",
+    "agent": "tsx scripts/agent.ts",
+    "demo:agent": "tsx scripts/demo-agent.ts",
     "dashboard": "tsx src/dashboard/server.ts",
     "smoke:dashboard": "tsx scripts/smoke-dashboard.ts"
   },

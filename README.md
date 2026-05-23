@@ -10,12 +10,13 @@ The project shows an agent reading curated public firmware-evidence cases, choos
 - Long-running evidence work can be launched as jobs, inspected later, cancelled, and viewed through shared run-folder state.
 - The agent and the dashboard inspect the same artifacts instead of hiding tool execution behind a black box.
 - One case now produces real evidence from real PX4 source at pinned upstream commits.
+- One case now launches a real MAVLink parser-library fuzz runner using pymavlink.
 
 ## What This Does Not Claim
 
 - It does not prove firmware safety.
 - It does not run PX4 SITL yet.
-- It does not fuzz MAVLink at runtime yet.
+- Parser-library fuzz evidence uses pymavlink on mutated frames; it does not prove PX4 firmware runtime behavior.
 - It does not discover a new vulnerability.
 - It does not use real supplier-confidential documents.
 - It does not expose a production queue, auth system, signing layer, or attested enclave.
@@ -26,8 +27,40 @@ The project shows an agent reading curated public firmware-evidence cases, choos
 npm install
 npm run typecheck
 npm run smoke:offline
+npm run demo:agent
 npm run dashboard
 ```
+
+1. Run `npm run demo:agent` to watch the agent orchestrate evidence work with the six domain tools.
+2. Run `npm run dashboard` to inspect the evidence jobs and artifacts the agent created.
+
+`demo:agent` requires one-time pi auth for `openai-codex`:
+
+```bash
+npx pi
+# inside pi: /login openai-codex
+npm run demo:agent
+```
+
+If auth is missing, the command fails with a clear login instruction instead of a stack trace.
+
+For a custom one-shot request:
+
+```bash
+npm run agent -- "Evaluate the parser-bounds case at the post-patch alias and summarize cautiously."
+npm run agent -- "Run the MAVLink parser library fuzz case with smoke-fast budget and summarize cautiously."
+```
+
+For a model-backed parser-fuzz demo:
+
+```bash
+npm run demo:agent -- --parser-fuzz
+```
+
+Each agent run writes local runtime state under `agent-runs/<timestamp>/`:
+
+- `transcript.md` — user prompt, tool activity, final answer
+- `summary.json` — run id, timestamps, status, observed job ids
 
 Open the URL printed by `npm run dashboard`.
 
@@ -41,14 +74,20 @@ In the dashboard, select a job whose runner kind is `static PX4 source evidence`
 - artifact previews for source context, commit info, and diff
 - the static-only caveat
 
-## Model-Backed Agent Smoke Test
+## Model-Backed Agent Commands
 
-The offline smoke test validates the system without calling a model. To prove the model can drive the six-tool surface, authenticate pi once:
+The offline smoke test validates the system without calling a model. To watch the product-facing agent orchestrate evidence work, authenticate pi once:
 
 ```bash
 npx pi
 # inside pi: /login openai-codex
-npm run smoke:agent
+npm run demo:agent
+```
+
+You can also run a custom one-shot request:
+
+```bash
+npm run agent -- "<your request>"
 ```
 
 The default model is `openai-codex/gpt-5.5` with thinking `xhigh`, using the ChatGPT Plus/Pro Codex subscription path through pi.
@@ -75,8 +114,17 @@ This is the core difference from “just ask a coding agent to run commands.” 
 | Case | Current evidence path | Status |
 | --- | --- | --- |
 | `mavlink-battery-status-bounds` | Real static-source inspection of PX4 PR #18411 commit pair. | Real, static-only evidence. |
+| `mavlink-parser-library-fuzz` | Real pymavlink parser-library fuzz on mutated BATTERY_STATUS frames. | Real parser-library action evidence; not PX4 SITL. |
 | `mavlink-ftp-path-handling` | Fake smoke runner that simulates path-handling evidence. | Demo scaffold only. |
 | `unclear-telemetry-dropout-claim` | Fake/manual-review smoke runner for vague supplier claims. | Demo scaffold only. |
+
+## Evidence Levels
+
+| Evidence level | Status |
+| --- | --- |
+| Static PX4 source evidence | Real for PR #18411 parser-bounds case. |
+| MAVLink parser-library fuzz evidence | Real after this milestone, using `pymavlink`; not PX4 SITL. |
+| Fake-smoke evidence | Still scaffold for FTP/vague cases. |
 
 ## Real vs Fake
 
@@ -86,6 +134,7 @@ This is the core difference from “just ask a coding agent to run commands.” 
 | Tool restrictions | Real allowlist: only six domain tools exposed. | None. |
 | Job lifecycle | Real detached runner processes, status files, events, cancellation. | Runner outputs may be fake depending on case. |
 | Parser-bounds case | Real PX4 source fetch, real pinned commits, real source context, real diff. | Static-only; no runtime execution. |
+| Parser-library fuzz case | Real pymavlink install, real seed generation, real mutations, real parser outcomes. | Parser-library only; not PX4 SITL or firmware runtime proof. |
 | FTP case | Job lifecycle and dashboard are real. | Evidence content is simulated. |
 | Telemetry vague-claim case | Job lifecycle and dashboard are real. | Evidence content is simulated/manual-review style. |
 | Dashboard | Real local read-only viewer over run folders. | Visual polish is intentionally basic for now. |
@@ -111,7 +160,28 @@ The verdict is deliberately narrow:
 
 This is static-source evidence only. It does not prove runtime behavior under SITL, fuzzing, or MAVLink replay.
 
+## MAVLink Parser-Library Fuzz Path
+
+The first real action runner is the MAVLink parser fuzz path for case `mavlink-parser-library-fuzz` with test card `mavlink-parser-fuzz`.
+
+The runner:
+
+1. Ensures a local Python venv under `.cache/pymavlink-venv` with a pinned `pymavlink` version.
+2. Generates real MAVLink v2 `BATTERY_STATUS` seed frames.
+3. Applies bounded mutations (byte flips, truncation, length/checksum corruption, payload extension).
+4. Feeds mutated frames into the real pymavlink decoder.
+5. Writes parser-library artifacts and a bounded verdict.
+
+Verdict semantics are deliberately narrow:
+
+- `no_issue_detected` means no parser exception was observed under this parser-library budget.
+- `attention_required` means at least one mutated input triggered a parser exception.
+
+This is parser-library evidence only. It does not prove PX4 `MavlinkReceiver` runtime behavior or PX4 SITL safety.
+
 ## Dashboard
+
+The dashboard is step two: a read-only inspection layer over the run folders the agent creates.
 
 Start it with:
 
@@ -148,17 +218,23 @@ runs/<job_id>/status.json
 runs/<job_id>/events.jsonl
 runs/<job_id>/result.json
 runs/<job_id>/artifacts/*
+agent-runs/<timestamp>/transcript.md
+agent-runs/<timestamp>/summary.json
 ```
 
-`runs/` is intentionally ignored by git. The agent tools, runner processes, smoke tests, and dashboard all read the same contract.
+`runs/` and `agent-runs/` are intentionally ignored by git. The agent tools, runner processes, smoke tests, and dashboard all read the same contract.
 
 ## Common Commands
 
 | Command | What it proves |
 | --- | --- |
 | `npm run typecheck` | TypeScript compiles. |
-| `npm run smoke:offline` | Tool allowlist, job lifecycle, fake runners, static-source runner, cancellation, and artifacts work without model calls. |
-| `npm run smoke:agent` | The model can drive the six-tool loop and summarize cautiously. Requires `openai-codex` auth. |
+| `npm run smoke:offline` | Tool allowlist, job lifecycle, fake runners, static-source runner, MAVLink parser fuzz runner, cancellation, and artifacts work without model calls. |
+| `npm run smoke:operator` | Agent transcript/report formatting works without model calls. |
+| `npm run demo:agent` | The product-facing agent orchestrates the parser-bounds case end to end and writes a local transcript. Requires `openai-codex` auth. |
+| `npm run demo:agent -- --parser-fuzz` | Same as above, but drives the parser-library fuzz case instead of static-source. Requires `openai-codex` auth. |
+| `npm run agent -- "<prompt>"` | One-shot natural-language agent run with streaming output and transcript/report artifacts. Requires `openai-codex` auth. |
+| `npm run smoke:agent` | Legacy model-backed smoke test for the six-tool loop. Requires `openai-codex` auth. |
 | `npm run dashboard` | Starts the local read-only viewer. |
 | `npm run smoke:dashboard` | Verifies dashboard health, job detail, artifact fetch, traversal rejection, and blocked mutation methods. |
 
@@ -168,33 +244,40 @@ runs/<job_id>/artifacts/*
 data/                         curated cases, methodology cards, pinned PX4 commit aliases
 scripts/                      smoke tests and demo validation scripts
 src/config.ts                 model/runtime constants
-src/session.ts                pi SDK session setup and system prompt
-src/tools/evidence.ts         six model-facing domain tools
+  src/session.ts                pi SDK session setup and system prompt
+  src/agent/                    agent operator run loop and transcript/report writers
+  src/tools/evidence.ts         six model-facing domain tools
 src/domain/catalog.ts         case and test-card loading
 src/domain/jobs.ts            job lifecycle, run folders, runner dispatch, cancellation
 src/domain/static-source-evidence.ts
                               real PX4 static-source evidence implementation
-src/runners/                  standalone runner entrypoints
+src/domain/mavlink-parser-fuzz.ts
+                              real pymavlink parser-library fuzz implementation
+src/runners/                  standalone runner entrypoints and Python harness
 src/dashboard/                local read-only dashboard server and static UI
-runs/                         ignored local runtime artifacts
-.cache/                       ignored PX4 checkout/cache
+runs/                         ignored local evidence job artifacts
+agent-runs/                   ignored local agent transcripts and summaries
+.cache/                       ignored PX4 checkout/cache and pymavlink Python venv
 ```
 
 ## Suggested Reviewer Walkthrough
 
 1. Read the “Real vs Fake” table above.
 2. Run `npm run smoke:offline`.
-3. Run `npm run dashboard` and open the URL.
-4. Select a `static PX4 source evidence` job.
-5. Open `source-context.md` and `diff.patch` in the artifact preview.
-6. Confirm the UI shows the static-only caveat.
-7. Optionally run `npm run smoke:agent` to see the model drive the same loop.
+3. Run `npm run demo:agent` to watch the agent orchestrate evidence and write a transcript.
+4. Run `npm run dashboard` and open the URL.
+5. Select a `static PX4 source evidence` job.
+6. Open `source-context.md` and `diff.patch` in the artifact preview.
+7. Confirm the UI shows the static-only caveat.
+8. Optionally inspect `agent-runs/<timestamp>/transcript.md` to verify the agent drove the tool loop.
 
 ## Current Limitations
 
-- Only one case has real evidence today.
-- That evidence is static-source inspection only.
+- Two cases have real evidence today: static PX4 source and parser-library fuzz.
+- Static-source evidence does not execute firmware.
+- Parser-library fuzz uses pymavlink only; it is not PX4 SITL or handler runtime proof.
 - PX4 source is fetched from GitHub, so the static-source runner needs network access unless the cache is already warm.
+- The parser fuzz runner needs Python 3 and network access on first run to create the pymavlink venv.
 - The local dashboard assumes trusted local run folders and binds to `127.0.0.1` by default.
 - The dashboard UI is intentionally functional first; visual polish can come later.
 
@@ -202,8 +285,8 @@ runs/                         ignored local runtime artifacts
 
 Good next steps are:
 
-1. Add a real lightweight runtime runner once the PX4 environment is ready.
+1. Add PX4 SITL or handler-specific runtime harness once the environment is ready.
 2. Improve dashboard visual design for presentation.
-3. Add a second real case (FTP path handling or telemetry conformance) only after the first runtime path is stable.
+3. Add a second real runtime case (FTP path handling or telemetry conformance) only after SITL/handler paths are stable.
 
-Avoid adding production queue infrastructure, auth, multi-agent hierarchy, or broad fuzzing until the narrow evidence loop has earned it.
+Avoid adding production queue infrastructure, auth, multi-agent hierarchy, or broad AFL/libFuzzer harnesses until the narrow evidence loop has earned it.

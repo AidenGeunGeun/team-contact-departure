@@ -20,6 +20,7 @@ const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 const jobsModuleUrl = new URL("../src/domain/jobs.ts", import.meta.url).href;
 const terminalStates = new Set(["succeeded", "failed", "cancelled"]);
 const STATIC_SOURCE_TIMEOUT_MS = 120_000;
+const MAVLINK_PARSER_FUZZ_TIMEOUT_MS = 180_000;
 const ALLOWED_STATIC_VERDICTS = new Set([
   "static_evidence_consistent_with_claim",
   "static_evidence_conflicts_with_claim",
@@ -93,15 +94,17 @@ function inspectFromFreshProcess(jobId: string): JobInspectionDetails {
 // ---- Catalog assertions ----------------------------------------------------
 
 const cases = await runListCases();
-assert.equal(cases.details.cases.length >= 3, true);
+assert.equal(cases.details.cases.length >= 4, true);
 assert.equal(cases.details.cases.some((item) => item.id === "mavlink-battery-status-bounds"), true);
+assert.equal(cases.details.cases.some((item) => item.id === "mavlink-parser-library-fuzz"), true);
 
 const loadedCase = await runLoadCase({ case_id: "mavlink-battery-status-bounds" });
 assert.equal(loadedCase.details.case.doc_snippet.includes("BATTERY_STATUS"), true);
 
 const testCards = await runListTestCards();
-assert.equal(testCards.details.test_cards.length >= 3, true);
+assert.equal(testCards.details.test_cards.length >= 4, true);
 assert.equal(testCards.details.test_cards.some((item) => item.id === "mavlink-parser-bounds"), true);
+assert.equal(testCards.details.test_cards.some((item) => item.id === "mavlink-parser-fuzz"), true);
 
 // ---- Fake runner: FTP case end-to-end --------------------------------------
 
@@ -320,6 +323,68 @@ if (networkAvailable) {
   }
 }
 
+// ---- MAVLink parser fuzz runner: end-to-end --------------------------------
+
+const fuzzLaunch = await runLaunchEvidenceJob({
+  case_id: "mavlink-parser-library-fuzz",
+  test_card_id: "mavlink-parser-fuzz",
+  target_commit: "parser-fuzz-smoke",
+  budget_profile: "smoke-fast",
+});
+assert.equal(fuzzLaunch.details.state, "queued");
+assertRunnerProcess(fuzzLaunch.details, {
+  kind: "mavlink-parser-fuzz",
+  entrypoint: "src/runners/mavlink-parser-fuzz-runner.ts",
+});
+assert.equal(existsSync(fuzzLaunch.details.run_dir), true);
+assert.equal(existsSync(`${fuzzLaunch.details.run_dir}/job.json`), true);
+assert.equal(existsSync(fuzzLaunch.details.artifact_dir), true);
+
+const fuzzComplete = await waitForState(
+  fuzzLaunch.details.job_id,
+  (state) => terminalStates.has(state),
+  MAVLINK_PARSER_FUZZ_TIMEOUT_MS,
+);
+const fuzzResult = fuzzComplete.details.result;
+assert.ok(fuzzResult, "mavlink parser fuzz job should have a result");
+assert.equal(fuzzResult.runner_kind, "mavlink-parser-fuzz");
+assert.equal(["succeeded", "failed"].includes(fuzzComplete.details.state), true);
+
+if (fuzzComplete.details.state === "succeeded") {
+  assert.equal(["no_issue_detected", "attention_required"].includes(fuzzResult.verdict ?? ""), true);
+  assert.ok(fuzzResult.mavlink_parser_fuzz, "mavlink_parser_fuzz metadata should be present");
+  assert.ok(fuzzResult.mavlink_parser_fuzz?.pymavlink_version, "pymavlink version should be recorded");
+  assert.equal(fuzzResult.mavlink_parser_fuzz?.mutation_budget, 100);
+  assert.ok(fuzzResult.mavlink_parser_fuzz?.inputs_tried && fuzzResult.mavlink_parser_fuzz.inputs_tried > 0);
+
+  const requiredArtifacts = [
+    "evidence-summary.md",
+    "parser-run-manifest.json",
+    "parser-outcomes.csv",
+    "seed-corpus.json",
+    "runner.log",
+  ];
+  for (const name of requiredArtifacts) {
+    const artifactPath: string | undefined = fuzzResult.artifact_paths.find((p) => p.endsWith(name));
+    assert.ok(artifactPath, `${name} must be present in artifact_paths`);
+    assert.equal(existsSync(artifactPath), true, `${artifactPath} should exist`);
+  }
+
+  const cautionText = (fuzzResult.cautions ?? []).join(" ").toLowerCase();
+  assert.equal(cautionText.includes("parser-library"), true);
+  assert.equal(cautionText.includes("not px4 sitl") || cautionText.includes("not px4 sitl evidence"), true);
+
+  const manifest = JSON.parse(
+    readFileSync(fuzzResult.artifact_paths.find((p) => p.endsWith("parser-run-manifest.json"))!, "utf8"),
+  );
+  assert.ok(manifest.pymavlink_version);
+  assert.equal(manifest.mutation_budget, 100);
+} else {
+  const failurePath = fuzzResult.artifact_paths.find((p) => p.endsWith("failure.md"));
+  assert.ok(failurePath, "failure.md must be present when parser fuzz setup fails");
+  assert.equal(existsSync(failurePath!), true);
+}
+
 // ---- Tool surface ----------------------------------------------------------
 
 const { session } = await createContactDepartureSession();
@@ -375,6 +440,15 @@ try {
             resolved_commit_hash: postStatic.resolved_commit_hash,
             artifacts: postComplete.details.result?.artifact_paths,
           },
+        },
+        mavlinkParserFuzz: {
+          job_id: fuzzComplete.details.job_id,
+          state: fuzzComplete.details.state,
+          verdict: fuzzResult?.verdict,
+          runner_kind: fuzzResult?.runner_kind,
+          pymavlink_version: fuzzResult?.mavlink_parser_fuzz?.pymavlink_version,
+          mutation_budget: fuzzResult?.mavlink_parser_fuzz?.mutation_budget,
+          artifacts: fuzzResult?.artifact_paths,
         },
       },
       null,

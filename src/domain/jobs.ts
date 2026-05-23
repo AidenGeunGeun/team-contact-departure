@@ -6,6 +6,13 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { loadCase, loadTestCard, type CuratedCase, type TestCard } from "./catalog.js";
 import {
+  loadMavlinkParserFuzzConfig,
+  mavlinkParserFuzzArtifactPaths,
+  produceMavlinkParserFuzzEvidence,
+  type MavlinkParserFuzzConfig,
+  type MavlinkParserFuzzOutcome,
+} from "./mavlink-parser-fuzz.js";
+import {
   loadStaticSourceConfig,
   produceStaticSourceEvidence,
   type StaticSourceConfig,
@@ -60,7 +67,7 @@ export interface EvidenceSignal {
   interpretation: string;
 }
 
-export type RunnerKind = "fake-smoke" | "static-source-evidence";
+export type RunnerKind = "fake-smoke" | "static-source-evidence" | "mavlink-parser-fuzz";
 
 export interface EvidenceResult {
   job_id: string;
@@ -74,6 +81,22 @@ export interface EvidenceResult {
   completed_at: string;
   runner_kind?: RunnerKind;
   static_source?: StaticSourceResultMetadata;
+  mavlink_parser_fuzz?: MavlinkParserFuzzResultMetadata;
+}
+
+export interface MavlinkParserFuzzResultMetadata {
+  case_id: string;
+  test_card_id: string;
+  target_commit: string;
+  pymavlink_version: string;
+  python_version: string;
+  dialect: string;
+  message_family: string;
+  mutation_budget: number;
+  inputs_tried: number;
+  exceptions_found: number;
+  mutation_strategies: string[];
+  budget_profile: string;
 }
 
 export interface StaticSourceResultMetadata {
@@ -157,12 +180,17 @@ const STATIC_SOURCE_RUNNER_ENTRYPOINT = "src/runners/static-source-evidence-runn
 const STATIC_SOURCE_RUNNER_SCRIPT_PATH = fileURLToPath(
   new URL("../runners/static-source-evidence-runner.ts", import.meta.url),
 );
+const MAVLINK_PARSER_FUZZ_RUNNER_ENTRYPOINT = "src/runners/mavlink-parser-fuzz-runner.ts";
+const MAVLINK_PARSER_FUZZ_RUNNER_SCRIPT_PATH = fileURLToPath(
+  new URL("../runners/mavlink-parser-fuzz-runner.ts", import.meta.url),
+);
 const RUNNER_CANCEL_SIGNAL = "SIGTERM" as const;
 const JOB_LOCK_DIR_NAME = ".state-lock";
 const JOB_FILE_LOCK_TIMEOUT_MS = 5000;
 const JOB_FILE_LOCK_POLL_MS = 10;
 const FAKE_STEP_DELAY_MS = 250;
 const STATIC_SOURCE_EXPECTED_DURATION_MS = 120_000;
+const MAVLINK_PARSER_FUZZ_EXPECTED_DURATION_MS = 180_000;
 const FAKE_STEPS = [
   {
     phase: "preparing-fixtures",
@@ -621,11 +649,18 @@ async function completeFailedJob(jobId: string, message: string): Promise<JobSta
     const summary =
       runnerKind === "static-source-evidence"
         ? `The static-source evidence runner failed: ${message}`
-        : `The fake evidence runner failed: ${message}`;
+        : runnerKind === "mavlink-parser-fuzz"
+          ? `The MAVLink parser fuzz runner failed: ${message}`
+          : `The fake evidence runner failed: ${message}`;
     const cautions =
       runnerKind === "static-source-evidence"
         ? ["This is a static-source runner infrastructure failure, not firmware evidence."]
-        : ["This is a fake runner infrastructure failure, not firmware evidence."];
+        : runnerKind === "mavlink-parser-fuzz"
+          ? [
+              "This is a parser-library runner infrastructure failure, not firmware evidence.",
+              "This is not PX4 SITL evidence.",
+            ]
+          : ["This is a fake runner infrastructure failure, not firmware evidence."];
     const result: EvidenceResult = {
       job_id: jobId,
       state: "failed",
@@ -1024,6 +1059,215 @@ export async function runStandaloneStaticSourceEvidenceJob(jobId: string): Promi
   }
 }
 
+function fuzzArtifactPaths(jobId: string, outcome: MavlinkParserFuzzOutcome): string[] {
+  const paths = jobPaths(jobId);
+  return mavlinkParserFuzzArtifactPaths(paths.artifactDirAbs, outcome).map(relativeToRepo);
+}
+
+async function buildMavlinkParserFuzzResult(
+  record: JobRecord,
+  outcome: MavlinkParserFuzzOutcome,
+  completedAt: string,
+): Promise<EvidenceResult> {
+  const artifactList = fuzzArtifactPaths(record.job_id, outcome);
+  const caseId = record.request.case_id;
+  const testCardId = record.request.test_card_id;
+  const targetCommit = record.request.target_commit;
+  const budgetProfile = record.request.budget_profile;
+
+  if (outcome.kind === "failure") {
+    const failure = outcome.failure;
+    return {
+      job_id: record.job_id,
+      state: "failed",
+      verdict: "runner_failed",
+      confidence: "low",
+      summary: failure.summary,
+      evidence_signals: [
+        {
+          name: "mavlink_parser_fuzz_runner_outcome",
+          value: failure.stage,
+          interpretation: "Parser fuzz runner could not complete a parser budget.",
+        },
+      ],
+      artifact_paths: artifactList,
+      cautions: failure.caveats,
+      completed_at: completedAt,
+      runner_kind: "mavlink-parser-fuzz",
+      mavlink_parser_fuzz: {
+        case_id: caseId,
+        test_card_id: testCardId,
+        target_commit: targetCommit,
+        pymavlink_version: "unknown",
+        python_version: "unknown",
+        dialect: "unknown",
+        message_family: "unknown",
+        mutation_budget: 0,
+        inputs_tried: 0,
+        exceptions_found: 0,
+        mutation_strategies: [],
+        budget_profile: budgetProfile,
+      },
+    };
+  }
+
+  const evidence = outcome.evidence;
+  const signals: EvidenceSignal[] = [
+    {
+      name: "parser_library",
+      value: `pymavlink ${evidence.pymavlink_version}`,
+      interpretation: "Parser-library fuzz used the pinned pymavlink version in the local venv.",
+    },
+    {
+      name: "mutation_budget",
+      value: evidence.mutation_budget,
+      interpretation: `Budget profile ${budgetProfile} allowed ${evidence.mutation_budget} mutations.`,
+    },
+    {
+      name: "inputs_tried",
+      value: evidence.inputs_tried,
+      interpretation: "Number of mutated MAVLink frames fed to the pymavlink decoder.",
+    },
+    {
+      name: "parser_exceptions_found",
+      value: evidence.exceptions_found,
+      interpretation:
+        evidence.exceptions_found > 0
+          ? "At least one mutated input triggered a parser exception."
+          : "No parser exceptions were observed under this budget.",
+    },
+    {
+      name: "message_family",
+      value: evidence.message_family,
+      interpretation: `Seed corpus centered on ${evidence.message_family} in the ${evidence.dialect} dialect.`,
+    },
+  ];
+
+  return {
+    job_id: record.job_id,
+    state: "succeeded",
+    verdict: evidence.verdict,
+    confidence: evidence.verdict === "attention_required" ? "medium" : "low",
+    summary: evidence.summary,
+    evidence_signals: signals,
+    artifact_paths: artifactList,
+    cautions: evidence.caveats,
+    completed_at: completedAt,
+    runner_kind: "mavlink-parser-fuzz",
+    mavlink_parser_fuzz: {
+      case_id: caseId,
+      test_card_id: testCardId,
+      target_commit: targetCommit,
+      pymavlink_version: evidence.pymavlink_version,
+      python_version: evidence.python_version,
+      dialect: evidence.dialect,
+      message_family: evidence.message_family,
+      mutation_budget: evidence.mutation_budget,
+      inputs_tried: evidence.inputs_tried,
+      exceptions_found: evidence.exceptions_found,
+      mutation_strategies: evidence.mutation_strategies,
+      budget_profile: budgetProfile,
+    },
+  };
+}
+
+async function completeWithMavlinkParserFuzzOutcome(
+  record: JobRecord,
+  outcome: MavlinkParserFuzzOutcome,
+): Promise<JobStatus> {
+  return withJobLock(record.job_id, async () => {
+    const current = await readStatus(record.job_id);
+    if (terminal(current.state)) {
+      return current;
+    }
+    const beforeResult = await readStatus(record.job_id);
+    if (terminal(beforeResult.state)) {
+      return beforeResult;
+    }
+    const completedAt = nowIso();
+    const result = await buildMavlinkParserFuzzResult(record, outcome, completedAt);
+    const paths = jobPaths(record.job_id);
+    await writeJson(paths.resultPath, result);
+    const finalStatus = await updateStatusUnlocked(record.job_id, {
+      state: result.state,
+      phase: result.state === "failed" ? "failed" : "complete",
+      progress: 100,
+      finished_at: result.completed_at,
+      message:
+        result.state === "failed"
+          ? result.summary
+          : "MAVLink parser fuzz evidence job completed.",
+    });
+    if (finalStatus.state === "cancelled" && finalStatus.state !== result.state) {
+      await writeJson(
+        paths.resultPath,
+        buildCancelledResult(record.job_id, finalStatus.finished_at ?? nowIso(), finalStatus.runner?.type),
+      );
+    }
+    return finalStatus;
+  });
+}
+
+export async function runStandaloneMavlinkParserFuzzJob(jobId: string): Promise<void> {
+  assertSafeJobId(jobId);
+  const controller = new AbortController();
+  installRunnerSignalHandlers(jobId, {
+    kindLabel: "MAVLink parser fuzz runner",
+    onAbort: () => controller.abort(),
+  });
+  try {
+    if (await shouldStopRunner(jobId)) {
+      return;
+    }
+    const startedStatus = await updateStatus(jobId, {
+      state: "running",
+      phase: "starting",
+      progress: 5,
+      started_at: nowIso(),
+      message: "Standalone MAVLink parser fuzz runner process started.",
+    });
+    if (terminal(startedStatus.state)) {
+      return;
+    }
+
+    const record = await readJobRecord(jobId);
+    const paths = jobPaths(jobId);
+    const outcome = await produceMavlinkParserFuzzEvidence({
+      case_id: record.request.case_id,
+      test_card_id: record.request.test_card_id,
+      target_commit: record.request.target_commit,
+      budget_profile: record.request.budget_profile,
+      artifact_dir: paths.artifactDirAbs,
+      signal: controller.signal,
+      onProgress: async (phase, progress, message) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (await shouldStopRunner(jobId)) {
+          return;
+        }
+        await updateStatus(jobId, {
+          state: "running",
+          phase,
+          progress,
+          message,
+        });
+      },
+    });
+
+    if (await shouldStopRunner(jobId)) {
+      return;
+    }
+    await completeWithMavlinkParserFuzzOutcome(record, outcome);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    await completeFailedJob(jobId, message);
+  }
+}
+
 function runnerEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of ["PATH", "TMPDIR", "TEMP", "TMP", "NODE_ENV"] as const) {
@@ -1043,13 +1287,25 @@ interface RunnerLaunchPlan {
   expectedDurationMs: number;
 }
 
-function chooseRunnerLaunchPlan(caseId: string, staticConfig: StaticSourceConfig): RunnerLaunchPlan {
+function chooseRunnerLaunchPlan(
+  caseId: string,
+  staticConfig: StaticSourceConfig,
+  fuzzConfig: MavlinkParserFuzzConfig,
+): RunnerLaunchPlan {
   if (Object.prototype.hasOwnProperty.call(staticConfig.cases, caseId)) {
     return {
       kind: "static-source-evidence",
       entrypoint: STATIC_SOURCE_RUNNER_ENTRYPOINT,
       scriptPath: STATIC_SOURCE_RUNNER_SCRIPT_PATH,
       expectedDurationMs: STATIC_SOURCE_EXPECTED_DURATION_MS,
+    };
+  }
+  if (Object.prototype.hasOwnProperty.call(fuzzConfig.cases, caseId)) {
+    return {
+      kind: "mavlink-parser-fuzz",
+      entrypoint: MAVLINK_PARSER_FUZZ_RUNNER_ENTRYPOINT,
+      scriptPath: MAVLINK_PARSER_FUZZ_RUNNER_SCRIPT_PATH,
+      expectedDurationMs: MAVLINK_PARSER_FUZZ_EXPECTED_DURATION_MS,
     };
   }
   return {
@@ -1114,7 +1370,11 @@ function signalRunnerProcess(status: JobStatus): RunnerSignalResult {
   }
 
   const runnerLabel =
-    status.runner?.type === "static-source-evidence" ? "static-source runner" : "fake runner";
+    status.runner?.type === "static-source-evidence"
+      ? "static-source runner"
+      : status.runner?.type === "mavlink-parser-fuzz"
+        ? "MAVLink parser fuzz runner"
+        : "fake runner";
   try {
     process.kill(pid, RUNNER_CANCEL_SIGNAL);
     return {
@@ -1142,12 +1402,13 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
     throw new Error("target_commit must be a non-empty string.");
   }
 
-  const [resolvedCase, resolvedTestCard, staticConfig] = await Promise.all([
+  const [resolvedCase, resolvedTestCard, staticConfig, fuzzConfig] = await Promise.all([
     loadCase(params.case_id),
     loadTestCard(params.test_card_id),
     loadStaticSourceConfig(),
+    loadMavlinkParserFuzzConfig(),
   ]);
-  const plan = chooseRunnerLaunchPlan(params.case_id, staticConfig);
+  const plan = chooseRunnerLaunchPlan(params.case_id, staticConfig, fuzzConfig);
   const jobId = createJobId();
   const paths = jobPaths(jobId);
   const launchedAt = nowIso();
@@ -1168,9 +1429,12 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
       expected_duration_ms: plan.expectedDurationMs,
     },
   };
-  const queueMessage = plan.kind === "static-source-evidence"
-    ? "Static-source evidence job queued."
-    : "Fake evidence job queued.";
+  const queueMessage =
+    plan.kind === "static-source-evidence"
+      ? "Static-source evidence job queued."
+      : plan.kind === "mavlink-parser-fuzz"
+        ? "MAVLink parser fuzz evidence job queued."
+        : "Fake evidence job queued.";
   const status: JobStatus = {
     job_id: jobId,
     state: "queued",

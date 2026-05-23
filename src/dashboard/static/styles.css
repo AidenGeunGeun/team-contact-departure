@@ -324,6 +324,12 @@ h3 {
   color: var(--info);
 }
 
+.runner-pill.fuzz {
+  border-color: rgba(21, 101, 192, 0.35);
+  background: rgba(21, 101, 192, 0.1);
+  color: #1565c0;
+}
+
 .summary-grid {
   display: grid;
   grid-template-columns: minmax(220px, 1.3fr) repeat(3, minmax(150px, 1fr));

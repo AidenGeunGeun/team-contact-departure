@@ -11,6 +11,18 @@
     ]
   },
   {
+    "id": "mavlink-parser-fuzz",
+    "title": "MAVLink parser library fuzz",
+    "plain_language_use": "Use this when the claim is about MAVLink parser robustness and you want real parser-library action evidence via pymavlink, not PX4 source inspection alone.",
+    "conceptual_run": "Generate BATTERY_STATUS seed frames, apply bounded byte-flip/truncation/checksum/payload mutations, feed them into pymavlink, record parse/reject/exception outcomes, and write parser artifacts with parser-library-only caveats.",
+    "evidence_signals": [
+      "pymavlink version and Python runtime are recorded in parser-run-manifest.json",
+      "mutation budget and inputs tried are recorded in evidence signals",
+      "parser exceptions or clean rejections are captured in parser-outcomes.csv",
+      "failure inputs are saved when an unexpected parser exception is observed"
+    ]
+  },
+  {
     "id": "mavlink-ftp-path-handling",
     "title": "MAVLink FTP path handling smoke",
     "plain_language_use": "Use this when the claim is about path normalization, traversal rejection, or keeping file access inside an expected root.",
