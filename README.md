@@ -1,113 +1,84 @@
 # Contact Departure
 
-Contact Departure is a supplier firmware evidence-orchestration proof of concept for Airbus Fly Your Ideas 2026.
+**An AI agent that orchestrates firmware-evidence work without judging the evidence itself.**
 
-The project shows an agent reading curated public firmware-evidence cases, choosing a methodology card, launching an inspectable evidence job, and summarizing the result with caution and artifacts. The point is not to claim autonomous vulnerability discovery. The point is to show a controlled agent loop where the model can coordinate existing evidence-gathering methods without arbitrary shell or file access.
+Contact Departure is a proof of concept for Airbus Fly Your Ideas 2026. It demonstrates a defensible answer to a real problem in aerospace supplier review: how to use AI in firmware verification without letting an LLM be the security judge.
 
-## What This Proves
+The pitch is three sentences:
 
-- A general coding agent can be narrowed into a domain evidence agent by exposing only project-specific tools.
-- Long-running evidence work can be launched as jobs, inspected later, cancelled, and viewed through shared run-folder state.
-- The agent and the dashboard inspect the same artifacts instead of hiding tool execution behind a black box.
-- One case now produces real evidence from real PX4 source at pinned upstream commits.
-- One case now launches a real MAVLink parser-library fuzz runner using pymavlink.
-- One case now launches a real PX4 SITL runtime probe that either observes live MAVLink behavior or records why the local environment could not run PX4.
-- One case now launches a real PX4 BATTERY_STATUS runtime replay that builds at a pinned pre- or post-patch commit, delivers a crafted MAVLink frame, and records PX4's response.
+- **AI proposes.** The agent reads curated supplier-style cases, picks a methodology, launches a constrained evidence job, and summarizes what happened.
+- **Evidence disposes.** The agent does not decide outcomes. Real runners produce real artifacts at pinned firmware commits; outcomes come from what the firmware actually did.
+- **Replay verifies.** Any completed job or pair can be packaged into a bundle. A reviewer runs one CLI command and re-derives the recorded verdict with no LLM in the loop.
 
-## What This Does Not Claim
+That contract is enforceable in code, not just claimed in slides.
 
-- It does not prove firmware safety.
-- PX4 SITL runtime probe evidence is bounded to a local headless boot and MAVLink heartbeat observation; it is not full runtime fuzzing or replay.
-- PX4 runtime replay evidence is one observation against one crafted BATTERY_STATUS frame; it is not safety proof or vulnerability discovery.
-- Parser-library fuzz evidence uses pymavlink on mutated frames; it does not prove PX4 firmware runtime behavior.
-- It does not discover a new vulnerability.
-- It does not use real supplier-confidential documents.
-- It does not expose a production queue, auth system, signing layer, or attested enclave.
+## Contents
 
-## Quick Demo
+1. [What this proves and does not claim](#what-this-proves-and-does-not-claim)
+2. [60-second walkthrough](#60-second-walkthrough)
+3. [Architecture in one paragraph](#architecture-in-one-paragraph)
+4. [The agent tool surface (eight tools)](#the-agent-tool-surface-eight-tools)
+5. [Evidence cases](#evidence-cases)
+6. [The verdict flip demonstration](#the-verdict-flip-demonstration)
+7. [Replayable evidence bundles](#replayable-evidence-bundles)
+8. [Per-runner detail](#per-runner-detail)
+9. [Dashboard](#dashboard)
+10. [Folder contract](#folder-contract)
+11. [Commands reference](#commands-reference)
+12. [Full reviewer walkthrough](#full-reviewer-walkthrough)
+13. [Repository map](#repository-map)
+14. [Limitations and environment requirements](#limitations-and-environment-requirements)
+15. [Deliberately out of scope](#deliberately-out-of-scope)
+
+## What this proves and does not claim
+
+**Proves:**
+
+- A general coding agent can be narrowed into a domain evidence agent by exposing only project-specific tools (no shell, no file access, no grep).
+- Real PX4 source evidence can be produced at pinned upstream commits and inspected by reviewers.
+- A real MAVLink parser-library fuzz runner can exercise pymavlink against mutated frames and capture outcomes.
+- A real PX4 SITL runtime probe can either boot PX4 and observe MAVLink behavior or honestly report why the local environment could not.
+- A real PX4 BATTERY_STATUS runtime replay can build PX4 at a pinned commit (provenance-gated), deliver a crafted frame, and record what the firmware did.
+- Two completed pre/post replay jobs can be compared into a pair artifact whose `verdict_flip_demonstrated` field is `true` only when seven independent conditions all hold (correct roles from hash, proven provenance on both sides, delivered frames, meaningful runtime outcomes, differing outcomes, byte-equal frames, matching budget profile).
+- Any completed job or pair can be bundled and replayed by a reviewer without the LLM, with replay rigor honestly labeled per runner kind.
+
+**Does not claim:**
+
+- Firmware safety.
+- Autonomous vulnerability discovery.
+- Use of real supplier-confidential documents (only public PX4/MAVLink material).
+- Production-grade queue, auth, signing, attestation, or enclave infrastructure.
+- That a clean runtime replay observation proves a vulnerability is absent.
+- That an anomalous runtime replay observation proves a vulnerability is present.
+
+## 60-second walkthrough
 
 ```bash
 npm install
 npm run typecheck
 npm run smoke:offline
-npm run demo:agent
 npm run dashboard
 ```
 
-1. Run `npm run demo:agent` to watch the agent orchestrate evidence work with the eight domain tools.
-2. Run `npm run dashboard` to inspect the evidence jobs and artifacts the agent created.
+That sequence:
 
-`demo:agent` requires one-time pi auth for `openai-codex`:
+- Verifies the agent's tool surface contains exactly the eight domain tools (no shell escape).
+- Exercises the full job lifecycle, real static-source evidence, real parser-fuzz evidence, real PX4 SITL probe (graceful runtime-unavailable on machines without a built PX4), real PX4 runtime replay (pre and post), pair comparison, and bundle creation + replay with PASS/FAIL assertions.
+- Starts a read-only dashboard at `http://127.0.0.1:4108` where you can inspect jobs, pair artifacts, and bundles.
+
+To watch the agent actually orchestrate (requires one-time `openai-codex` auth via `npx pi` then `/login openai-codex`):
 
 ```bash
-npx pi
-# inside pi: /login openai-codex
 npm run demo:agent
-```
-
-If auth is missing, the command fails with a clear login instruction instead of a stack trace.
-
-For a custom one-shot request:
-
-```bash
-npm run agent -- "Evaluate the parser-bounds case at the post-patch alias and summarize cautiously."
-npm run agent -- "Run the MAVLink parser library fuzz case with smoke-fast budget and summarize cautiously."
-npm run agent -- "Run the PX4 SITL runtime probe case with smoke-fast budget and summarize cautiously."
-npm run agent -- "Run the mavlink-battery-status-runtime-replay case at mavlink-battery-status-bounds-post with smoke-fast budget and summarize cautiously."
-```
-
-For a model-backed parser-fuzz demo:
-
-```bash
-npm run demo:agent -- --parser-fuzz
-```
-
-For a model-backed PX4 SITL runtime probe demo:
-
-```bash
-npm run demo:agent -- --px4-sitl-probe
-```
-
-Each agent run writes local runtime state under `agent-runs/<timestamp>/`:
-
-- `transcript.md` — user prompt, tool activity, final answer
-- `summary.json` — run id, timestamps, status, observed job ids
-
-Open the URL printed by `npm run dashboard`.
-
-In the dashboard, select a job whose runner kind is `static PX4 source evidence`. That job is the real-evidence path. It should show:
-
-- PX4 commit hash
-- file: `src/modules/mavlink/mavlink_receiver.cpp`
-- function: `MavlinkReceiver::handle_message_battery_status`
-- source line range
-- PR URL for PX4 PR #18411
-- artifact previews for source context, commit info, and diff
-- the static-only caveat
-
-## Model-Backed Agent Commands
-
-The offline smoke test validates the system without calling a model. To watch the product-facing agent orchestrate evidence work, authenticate pi once:
-
-```bash
-npx pi
-# inside pi: /login openai-codex
-npm run demo:agent
-```
-
-You can also run a custom one-shot request:
-
-```bash
-npm run agent -- "<your request>"
 ```
 
 The default model is `openai-codex/gpt-5.5` with thinking `xhigh`, using the ChatGPT Plus/Pro Codex subscription path through pi.
 
-## Agent Tool Surface
+## Architecture in one paragraph
 
-The pi runtime is used through the SDK, but its built-in coding tools are not exposed. The model does not get `bash`, `read`, `write`, `edit`, `grep`, `find`, or `ls`.
+The agent runs in a pi SDK session with `tools: [...DOMAIN_TOOL_NAMES]` — pi's built-in coding tools (`bash`, `read`, `write`, `edit`, `grep`, `find`, `ls`) are not exposed. The eight domain tools let the model list cases, load a case, list methodology cards, launch a non-blocking evidence job, inspect a job, cancel a job, compare two completed jobs into a pair artifact, and create a replay bundle from a completed job or pair. Runners execute as detached child processes writing to `runs/<job_id>/`. The dashboard and the agent both read the same artifacts. Bundle creation packages those artifacts into `bundles/<bundle_id>/` with a manifest and a runner-specific replay script under `src/replay/` (which has zero agent/session/LLM imports). A reviewer runs `npm run replay -- <bundle_path>` and gets PASS or FAIL with no model involvement.
 
-The only active model-facing tools are:
+## The agent tool surface (eight tools)
 
 | Tool | Purpose |
 | --- | --- |
@@ -117,208 +88,140 @@ The only active model-facing tools are:
 | `launch_evidence_job` | Start a non-blocking evidence job and return a job id. |
 | `inspect_job` | Read job status, progress, events, result, and artifact paths. |
 | `cancel_job` | Stop a queued or running evidence job. |
-| `compare_evidence_pair` | Compare two completed pre/post jobs and write a pair artifact with role, frame, and provenance fields. |
-| `create_evidence_bundle` | Package a completed job or pair into `bundles/<bundle_id>/` with manifest, artifacts, and a reviewer replay command. Reads existing results only. |
+| `compare_evidence_pair` | Compare two completed pre/post jobs (same case, card, budget) and write a pair artifact with role detection from commit hashes, frame byte equality, provenance conditions, and a strict `verdict_flip_demonstrated` field. |
+| `create_evidence_bundle` | Package a completed job or pair into `bundles/<bundle_id>/` with manifest, embedded artifacts, replay script, and reviewer README. Reads existing results only. |
 
-This is the core difference from “just ask a coding agent to run commands.” The model chooses among domain methods; it does not receive an arbitrary command surface.
+This is the core difference from "just ask a coding agent to run commands." The model chooses among domain methods; it does not receive an arbitrary command surface.
 
-## Evidence Cases
+## Evidence cases
 
-| Case | Current evidence path | Status |
+| Case | Evidence path | Status |
 | --- | --- | --- |
-| `mavlink-battery-status-bounds` | Real static-source inspection of PX4 PR #18411 commit pair. | Real, static-only evidence. |
+| `mavlink-battery-status-bounds` | Real static-source inspection of PX4 PR #18411 commit pair. | Real, static-only. |
 | `mavlink-parser-library-fuzz` | Real pymavlink parser-library fuzz on mutated BATTERY_STATUS frames. | Real parser-library action evidence; not PX4 SITL. |
-| `px4-runtime-probe` | Real PX4 SITL runtime probe with preflight, setup notes, and MAVLink observation when possible. | Real runtime probe evidence; not proof of firmware safety. |
+| `px4-runtime-probe` | Real PX4 SITL runtime probe with preflight, setup notes, and MAVLink heartbeat when possible. | Real runtime probe; not firmware safety proof. |
 | `mavlink-battery-status-runtime-replay` | Real PX4 SITL runtime replay at pinned pre- or post-patch commit with crafted BATTERY_STATUS frame delivery. | One runtime observation; not safety proof or vulnerability discovery. |
 | `mavlink-ftp-path-handling` | Fake smoke runner that simulates path-handling evidence. | Demo scaffold only. |
 | `unclear-telemetry-dropout-claim` | Fake/manual-review smoke runner for vague supplier claims. | Demo scaffold only. |
 
-## Evidence Levels
+## The verdict flip demonstration
 
-| Evidence level | Status |
-| --- | --- |
-| Static PX4 source evidence | Real for PR #18411 parser-bounds case. |
-| MAVLink parser-library fuzz evidence | Real, using `pymavlink`; not PX4 SITL. |
-| PX4 SITL runtime probe evidence | Real when a local SITL binary is available; otherwise records runtime-unavailable blockers. |
-| PX4 BATTERY_STATUS runtime replay evidence | Real when PX4 can be built/run locally; delivers one crafted frame and records the observation. |
-| Fake-smoke evidence | Still scaffold for FTP/vague cases. |
+This is the headline. Same case, same methodology card, same crafted MAVLink frame, same budget profile. Only the pinned PX4 commit changes between pre-patch (`mavlink-battery-status-bounds-pre`) and post-patch (`mavlink-battery-status-bounds-post`). The agent launches two replay jobs and then calls `compare_evidence_pair` with the completed job IDs.
 
-## Real vs Fake
+**The pair tool refuses to write any artifact** when the pair is structurally invalid:
 
-| Area | Real today | Fake / scaffold today |
+- Same role on both jobs (two pre-patch or two post-patch).
+- Same resolved commit hash.
+- Either commit hash does not map to a known role for the case.
+- `case_id`, `test_card_id`, or `budget_profile` differ between the two jobs.
+- Embedded `frame-record.json` bytes differ between the two jobs.
+
+When refusal conditions are not triggered, `pair.json` is written. Its headline field, **`verdict_flip_demonstrated`**, is `true` only when all seven of these conditions hold:
+
+1. Roles correctly derived from `resolved_commit_hash` via lookup against `data/static-source-commits.json` (no lexicographic fallback).
+2. Both jobs have `firmware_commit_proven: true` (manifest-verified or freshly built at the pinned commit).
+3. Both jobs have `frame_delivered: true` (the crafted frame actually reached PX4).
+4. Both jobs ended in a meaningful runtime outcome (`runtime_clean` or `runtime_anomalous`), not `runtime_unavailable`, `runner_failed`, or `cancelled`.
+5. Outcomes differ between the two jobs.
+6. `frame_bytes_equal` is `true`.
+7. `budget_profile_equal` is `true`.
+
+If any one condition fails, `verdict_flip_demonstrated` is `false` and `pair.json` records which supporting conditions hold and which do not — a reviewer reading the JSON alone can see exactly what is and is not proven. The dashboard renders the pair side-by-side at `/pair.html?pair_id=...` with `verdict_flip_demonstrated` as the headline indicator and the seven conditions as a checklist.
+
+This is one firmware-driven runtime difference against one crafted frame. It is not vulnerability discovery and not a safety claim. The outcome comes from what PX4 actually does at runtime; the runner does not hardcode pre-patch as anomalous or post-patch as clean.
+
+**Producing a live `verdict_flip_demonstrated: true` pair requires verified PX4 builds at both commits on the local machine.** Offline smoke uses `smoke-fast` budget which skips PX4 builds; in that mode the live pair reports `verdict_flip_demonstrated: false`. The pair tool's logic is proven against synthetic fixtures in offline smoke, including the `verdict_flip_demonstrated: true` true-path and refusal of every invalid pair composition (same role, same hash, unmapped role, case/card mismatch, budget mismatch, frame mismatch).
+
+## Replayable evidence bundles
+
+A reviewer should not have to trust the agent's summary. After a job or pair reaches a terminal state, the agent can call `create_evidence_bundle` to write:
+
+```text
+bundles/<bundle_id>/manifest.json   # canonical record (schema_version 1)
+bundles/<bundle_id>/result.json     # job result, or pair.json for pair bundles
+bundles/<bundle_id>/artifacts/      # embedded artifact copies
+bundles/<bundle_id>/replay.sh       # thin wrapper around the CLI replay entrypoint
+bundles/<bundle_id>/README.md       # human-readable summary and replay command
+```
+
+Replay is **CLI only** — intentionally not an agent tool, not a dashboard action:
+
+```bash
+npm run replay -- bundles/<bundle_id>
+```
+
+Replay scripts live under `src/replay/` and import zero agent/session/pi/LLM modules. That isolation is asserted by `grep -r "@earendil-works\|createAgentSession\|getModel" src/replay/` returning nothing.
+
+| Runner kind | Replay kind | What replay proves |
 | --- | --- | --- |
-| Agent harness | Real pi SDK session using GPT-5.5 via `openai-codex`. | None. |
-| Tool restrictions | Real allowlist: only eight domain tools exposed. | None. |
-| Replayable evidence bundles | Real `create_evidence_bundle` packages completed jobs/pairs; `npm run replay` re-derives verdicts with no LLM. | Full replay requires warm PX4 cache or pymavlink venv; partial replay kinds verify artifacts only and do not prove runtime behavior on their own. |
-| Job lifecycle | Real detached runner processes, status files, events, cancellation. | Runner outputs may be fake depending on case. |
-| Parser-bounds case | Real PX4 source fetch, real pinned commits, real source context, real diff. | Static-only; no runtime execution. |
-| Parser-library fuzz case | Real pymavlink install, real seed generation, real mutations, real parser outcomes. | Parser-library only; not PX4 SITL or firmware runtime proof. |
-| PX4 runtime probe case | Real preflight, PX4 setup notes, optional headless SITL boot, MAVLink observation when possible. | Runtime probe only; heartbeat observation does not prove firmware safety. |
-| PX4 runtime replay case | Real commit checkout/build, headless SITL boot, crafted BATTERY_STATUS frame delivery, observation artifacts. | One runtime observation only; not safety proof or vulnerability discovery. |
-| Verdict-flip pair artifact | Real `compare_evidence_pair` tool reads two completed jobs and writes `pairs/<pair_id>/pair.json`. | Comparison only; does not launch jobs or judge outcomes. |
-| FTP case | Job lifecycle and dashboard are real. | Evidence content is simulated. |
-| Telemetry vague-claim case | Job lifecycle and dashboard are real. | Evidence content is simulated/manual-review style. |
-| Dashboard | Real local read-only viewer over run folders. | Visual polish is intentionally basic for now. |
+| `fake-smoke` | trivial | Re-derives the verdict string deterministically from inputs. |
+| `static-source-evidence` | full | Re-fetches PX4 at `pinned_inputs.px4_commit_hash`, verifies the resolved hash matches, and re-runs the source-pattern check. |
+| `mavlink-parser-fuzz` | full (if local venv has the pinned pymavlink version) | Verifies the venv's installed pymavlink equals `pinned_inputs.pymavlink_version`; refuses with both versions named on mismatch; otherwise re-runs the harness with the pinned random seed. |
+| `px4-sitl-probe` | partial | Re-runs preflight against the current environment and compares findings to the bundled preflight; reports still-hold and differ entries; does not re-boot PX4. |
+| `px4-runtime-replay` | partial (full only when a verified PX4 build manifest matches the recorded commit) | Verifies frame bytes and artifact structure; can optionally re-deliver the frame when the local build matches. |
+| `pair` | full | Recomputes `pair.json` from embedded job results, byte-compares the result, and byte-compares the embedded frame records. |
 
-## Static-Source Evidence Path
+**Honesty contract:** partial replay paths do not say "Verdict match" — replay output for those paths explicitly says "Verdict not re-derived; bundled record and re-evaluable signals verified." Tampering with `manifest.json` (for example changing the recorded verdict) causes replay to exit non-zero with a clear FAIL line. Offline smoke exercises tampered-verdict, pymavlink-version-mismatch, static-source-commit-mismatch, and pair-frame-tamper failure cases.
 
-The first real case is based on PX4 PR #18411: `mavlink: receiver battery_status prevent out of bounds access`.
+## Per-runner detail
 
-Pinned aliases live in `data/static-source-commits.json`:
+### Static-source evidence (`mavlink-battery-status-bounds`)
+
+Based on PX4 PR #18411: *"mavlink: receiver battery_status prevent out of bounds access."*
+
+Pinned aliases in `data/static-source-commits.json`:
 
 | Alias | Role | Commit |
 | --- | --- | --- |
 | `mavlink-battery-status-bounds-pre` | pre-patch | `12670b70f48fbbd9305ad6074d7f95d9853fc63d` |
 | `mavlink-battery-status-bounds-post` | post-patch | `7ec7d9d173b3c4aedccdda51cbe670f70686b4b6` |
 
-The runner fetches PX4 into `.cache/px4`, reads the target file at the resolved commit, locates `MavlinkReceiver::handle_message_battery_status`, and checks the ordering of the `cell_count < 10` guard relative to the `voltages[cell_count]` access.
+The runner fetches PX4 into `.cache/px4`, reads the target file at the resolved commit, locates `MavlinkReceiver::handle_message_battery_status`, and checks the ordering of the `cell_count < 10` guard relative to the `voltages[cell_count]` access. Pre-patch source conflicts with the supplier claim because the array read appears before the guard; post-patch source is consistent with the claim because the guard short-circuits before the read; any refactor breaking the narrow pattern returns inconclusive rather than guessing. Static-source evidence does not prove runtime behavior under SITL, fuzzing, or MAVLink replay.
 
-The verdict is deliberately narrow:
+### MAVLink parser-library fuzz (`mavlink-parser-library-fuzz`)
 
-- pre-patch source conflicts with the claim because the array read appears before the guard;
-- post-patch source is consistent with the claim because the guard short-circuits before the read;
-- any refactor that breaks the narrow pattern should return inconclusive rather than guessing.
+The runner ensures a local Python venv under `.cache/pymavlink-venv` with a pinned `pymavlink` version, generates real MAVLink v2 `BATTERY_STATUS` seed frames, applies bounded mutations (byte flips, truncation, length/checksum corruption, payload extension), feeds them into the real pymavlink decoder, and writes parser-library artifacts. Verdict `no_issue_detected` means no parser exception observed under budget; `attention_required` means at least one mutated input triggered a parser exception. Parser-library evidence does not prove PX4 `MavlinkReceiver` runtime behavior.
 
-This is static-source evidence only. It does not prove runtime behavior under SITL, fuzzing, or MAVLink replay.
+### PX4 SITL runtime probe (`px4-runtime-probe`)
 
-## MAVLink Parser-Library Fuzz Path
+The runner writes a preflight report for build/runtime dependencies (git, cmake, make, g++, optional ninja, Python), reuses `.cache/px4` when present, optionally attempts a PX4 build when `local-default` budget allows, starts headless PX4 SITL when a binary is available, and attempts a live MAVLink heartbeat observation via pymavlink. `runtime_observed` means a live heartbeat was seen; `runtime_unavailable` means prerequisites or a local SITL binary were missing; `runtime_abnormal` means PX4 appeared to start but the expected observation did not occur. Runtime probe evidence does not prove firmware safety or parser-bounds fixes at runtime.
 
-The first real action runner is the MAVLink parser fuzz path for case `mavlink-parser-library-fuzz` with test card `mavlink-parser-fuzz`.
+### PX4 BATTERY_STATUS runtime replay (`mavlink-battery-status-runtime-replay`)
 
-The runner:
+The runner resolves `target_commit` to a pinned PX4 hash, writes preflight, records the exact crafted frame bytes (`frame-record.json`, `frame-record.hex`), checks out PX4 at the resolved commit, builds or reuses `px4_sitl_default` when budget allows, boots headless PX4 SITL, waits for MAVLink, delivers the bounds-test frame via pymavlink, and observes whether PX4 stays up. `runtime_clean` means PX4 booted, the frame was delivered, and no crash or abnormal log markers were observed in the observation window. `runtime_anomalous` means the frame was delivered but PX4 exited or logged abnormal markers — warrants follow-up, not a vulnerability verdict. `runtime_unavailable` means prerequisites or a verified build manifest were missing. Binary provenance is enforced: the runner refuses to claim a commit association without a manifest-verified or freshly-built binary at that commit (`firmware_commit_proven` field reflects this honestly).
 
-1. Ensures a local Python venv under `.cache/pymavlink-venv` with a pinned `pymavlink` version.
-2. Generates real MAVLink v2 `BATTERY_STATUS` seed frames.
-3. Applies bounded mutations (byte flips, truncation, length/checksum corruption, payload extension).
-4. Feeds mutated frames into the real pymavlink decoder.
-5. Writes parser-library artifacts and a bounded verdict.
+### Fake-smoke (FTP path handling, vague telemetry claim)
 
-Verdict semantics are deliberately narrow:
-
-- `no_issue_detected` means no parser exception was observed under this parser-library budget.
-- `attention_required` means at least one mutated input triggered a parser exception.
-
-This is parser-library evidence only. It does not prove PX4 `MavlinkReceiver` runtime behavior or PX4 SITL safety.
-
-## PX4 SITL Runtime Probe Path
-
-The first real PX4 runtime probe path is case `px4-runtime-probe` with test card `px4-sitl-probe`.
-
-The runner:
-
-1. Writes a preflight report for build/runtime dependencies (git, cmake, make, g++, optional ninja, Python).
-2. Reuses `.cache/px4` when present and records whether a `px4_sitl_default` binary already exists.
-3. Optionally attempts a PX4 build when the budget profile allows it (`local-default`; `smoke-fast` skips build for stable offline smoke).
-4. When a SITL binary is available, starts a headless PX4 instance and attempts a live MAVLink heartbeat observation via pymavlink.
-5. Writes runtime probe artifacts and a cautious summary.
-
-Outcome semantics are deliberately narrow:
-
-- `runtime_observed` means a live MAVLink heartbeat was observed from the local PX4 instance.
-- `runtime_unavailable` means required prerequisites or a local SITL binary were missing; artifacts explain the blocker.
-- `runtime_abnormal` means PX4 appeared to start or partially start, but the expected MAVLink observation did not occur.
-
-This is PX4 runtime probe evidence only. It does not prove firmware safety, parser-bounds fixes at runtime, or vulnerability replay.
-
-## PX4 BATTERY_STATUS Runtime Replay Path
-
-The first real PX4 runtime replay path is case `mavlink-battery-status-runtime-replay` with test card `px4-runtime-replay`.
-
-The runner:
-
-1. Resolves `target_commit` to a pinned PX4 hash (for example `mavlink-battery-status-bounds-post`).
-2. Writes preflight and records the exact crafted BATTERY_STATUS frame bytes (`frame-record.json`, `frame-record.hex`).
-3. Checks out the PX4 cache at the resolved commit and builds or reuses `px4_sitl_default` when the budget profile allows.
-4. Boots headless PX4 SITL, waits for MAVLink, delivers the bounds-test frame via pymavlink, and observes whether PX4 stays up.
-5. Writes delivery and observation artifacts plus a cautious summary.
-
-Outcome semantics are deliberately narrow:
-
-- `runtime_clean` means PX4 booted, the crafted frame was delivered, and no crash or abnormal log markers were observed in the observation window.
-- `runtime_anomalous` means the frame was delivered but PX4 exited, logged abnormal markers, or otherwise behaved unexpectedly; this warrants follow-up, not a vulnerability verdict.
-- `runtime_unavailable` means prerequisites or a local SITL binary were missing; artifacts explain the blocker.
-
-This is runtime replay evidence only. It is one observation against one crafted frame, not proof of firmware safety or autonomous vulnerability discovery.
-
-## Verdict Flip Demonstration
-
-The headline PoC milestone compares two completed replay jobs from the same case and methodology card. The crafted BATTERY_STATUS frame bytes are identical; only the pinned PX4 commit changes between pre-patch (`mavlink-battery-status-bounds-pre`) and post-patch (`mavlink-battery-status-bounds-post`).
-
-The agent launches the two replay jobs and then calls `compare_evidence_pair` with the completed job IDs. That tool reads existing results only — it does not launch new jobs — and stores a machine-readable pair artifact at `pairs/<pair_id>/pair.json`. The dashboard renders the pair side-by-side from that JSON.
-
-This is one firmware-driven runtime difference against one crafted frame. It is not a vulnerability discovery and not a safety claim. The outcome comes from what PX4 actually does at runtime; the runner does not hardcode pre-patch as anomalous or post-patch as clean.
-
-## Replayable Evidence Bundles
-
-A reviewer should not have to trust the agent summary alone. After a job or pair reaches a terminal state, the agent can call `create_evidence_bundle` to write a self-contained directory under `bundles/<bundle_id>/`:
-
-```text
-bundles/<bundle_id>/manifest.json   # canonical record (schema_version 1)
-bundles/<bundle_id>/result.json    # copy of the job result (or pair.json for pair bundles)
-bundles/<bundle_id>/artifacts/     # embedded artifact copies
-bundles/<bundle_id>/replay.sh      # thin wrapper around the CLI replay entrypoint
-bundles/<bundle_id>/README.md      # human-readable summary and replay instructions
-```
-
-Replay is **CLI only** — it is intentionally not an agent tool and not a dashboard action:
-
-```bash
-npm run replay -- bundles/<bundle_id>
-```
-
-Replay scripts live under `src/replay/` and do not import the pi agent, session, or any LLM module.
-
-| Runner kind | Replay kind | What replay proves |
-| --- | --- | --- |
-| `fake-smoke` | trivial | Re-derives the verdict string deterministically from inputs. |
-| `static-source-evidence` | full | Re-fetches PX4 at the recorded commit and re-runs the source-pattern check. |
-| `mavlink-parser-fuzz` | full | Re-runs the pymavlink harness with the pinned random seed when the local venv exists. |
-| `px4-sitl-probe` | partial | Verifies recorded artifacts; reports that runtime re-boot requires the original environment. |
-| `px4-runtime-replay` | partial (full only when a verified PX4 build manifest matches the recorded commit) | Verifies frame bytes and artifact structure; optional frame re-delivery when the local build matches. |
-| `pair` | full | Recomputes `pair.json` from embedded job results and asserts byte equality. |
-
-**Honesty contract:** partial replay does not prove runtime behavior on its own. The bundle manifest's `replay_kind` and `replay_kind_reason` fields state what was verified. Tampering with `manifest.json` (for example changing the recorded verdict) causes replay to exit non-zero with a clear `FAIL` line.
+Demo scaffold only. Job lifecycle, status files, events, cancellation, dashboard rendering, and bundle/replay paths are all real. Evidence content is simulated. Useful for exercising the orchestration plumbing without real firmware dependencies.
 
 ## Dashboard
 
-The dashboard is step two: a read-only inspection layer over the run folders the agent creates.
-
-Start it with:
+Read-only local viewer over run folders, pair artifacts, and bundles.
 
 ```bash
 npm run dashboard
+# default: http://127.0.0.1:4108
+# override: DASHBOARD_HOST=127.0.0.1 DASHBOARD_PORT=4109 npm run dashboard
 ```
 
-Default URL: `http://127.0.0.1:4108`.
-
-Environment overrides:
-
-```bash
-DASHBOARD_HOST=127.0.0.1 DASHBOARD_PORT=4109 npm run dashboard
-```
-
-The dashboard is read-only. It reads run folders and exposes a small local API:
+API surface (all GET, no mutation endpoints):
 
 - `GET /api/health`
-- `GET /api/jobs`
-- `GET /api/jobs/:job_id`
-- `GET /api/jobs/:job_id/events`
-- `GET /api/jobs/:job_id/artifacts`
-- `GET /api/jobs/:job_id/artifacts/:artifact_name`
-- `GET /api/pairs`
-- `GET /api/pairs/:pair_id`
-- `GET /api/bundles`
-- `GET /api/bundles/:bundle_id`
+- `GET /api/jobs`, `GET /api/jobs/:job_id`
+- `GET /api/jobs/:job_id/events`, `/artifacts`, `/artifacts/:artifact_name`
+- `GET /api/pairs`, `GET /api/pairs/:pair_id`
+- `GET /api/bundles`, `GET /api/bundles/:bundle_id`
 
-Open `http://127.0.0.1:4108/pair.html?pair_id=<pair_id>` for the side-by-side verdict-flip view.
+Pages:
 
-Open `http://127.0.0.1:4108/bundles.html` for the bundle list and `http://127.0.0.1:4108/bundle.html?bundle_id=<bundle_id>` for manifest, artifact paths, and the exact replay command. The dashboard does not run replay.
+- `/` — job list and detail.
+- `/pair.html?pair_id=<pair_id>` — side-by-side verdict flip view with the seven-condition checklist.
+- `/bundles.html` — bundle list.
+- `/bundle.html?bundle_id=<bundle_id>` — manifest, artifact paths, and the exact `npm run replay` command.
 
-There are no POST, PUT, PATCH, or DELETE endpoints.
+The dashboard does not run replay. Visual polish is intentionally functional; the goal is honest information density.
 
-## Run Folder Contract
-
-Every launched job writes local runtime state under `runs/<job_id>/`:
+## Folder contract
 
 ```text
 runs/<job_id>/job.json
@@ -327,83 +230,98 @@ runs/<job_id>/events.jsonl
 runs/<job_id>/result.json
 runs/<job_id>/artifacts/*
 pairs/<pair_id>/pair.json
-bundles/<bundle_id>/*
+bundles/<bundle_id>/manifest.json
+bundles/<bundle_id>/result.json
+bundles/<bundle_id>/artifacts/*
+bundles/<bundle_id>/replay.sh
+bundles/<bundle_id>/README.md
 agent-runs/<timestamp>/transcript.md
 agent-runs/<timestamp>/summary.json
 ```
 
-`runs/`, `pairs/`, `bundles/`, and `agent-runs/` are intentionally ignored by git. The agent tools, runner processes, smoke tests, and dashboard all read the same contract.
+`runs/`, `pairs/`, `bundles/`, `agent-runs/`, and `.cache/` are gitignored. The agent tools, runner processes, smoke tests, dashboard, and replay CLI all read the same contract.
 
-## Common Commands
+## Commands reference
 
 | Command | What it proves |
 | --- | --- |
 | `npm run typecheck` | TypeScript compiles. |
-| `npm run smoke:offline` | Tool allowlist, job lifecycle, fake runners, static-source runner, MAVLink parser fuzz runner, PX4 SITL probe runner, PX4 runtime replay runner (pre/post), evidence pair comparison, cancellation, and artifacts work without model calls. |
+| `npm run smoke:offline` | Tool allowlist (eight tools, no shell escape), job lifecycle, all four real runners, fake runners, pair comparison (including same-role/case-mismatch/budget-mismatch/frame-mismatch refusal and synthetic `verdict_flip_demonstrated: true` fixture), bundle creation and replay (including pymavlink-mismatch, static-commit-mismatch, pair-frame-tamper, and tampered-verdict FAIL fixtures), cancellation, and artifacts work without model calls. |
 | `npm run smoke:operator` | Agent transcript/report formatting works without model calls. |
-| `npm run demo:agent` | The product-facing agent orchestrates the parser-bounds case end to end and writes a local transcript. Requires `openai-codex` auth. |
-| `npm run demo:agent -- --parser-fuzz` | Same as above, but drives the parser-library fuzz case instead of static-source. Requires `openai-codex` auth. |
-| `npm run demo:agent -- --px4-sitl-probe` | Same as above, but drives the PX4 SITL runtime probe case. Requires `openai-codex` auth. |
-| `npm run agent -- "<prompt>"` | One-shot natural-language agent run with streaming output and transcript/report artifacts. Requires `openai-codex` auth. |
-| `npm run smoke:agent` | Legacy model-backed smoke test for the six-tool loop. Requires `openai-codex` auth. |
+| `npm run smoke:dashboard` | Dashboard health, job detail, pair list and detail API, bundle list and detail pages, artifact fetch, traversal rejection, blocked mutation methods. |
+| `npm run demo:agent` | The product-facing agent orchestrates the parser-bounds case end to end and writes a transcript. Requires `openai-codex` auth. |
+| `npm run demo:agent -- --parser-fuzz` | Same, but drives the parser-library fuzz case. |
+| `npm run demo:agent -- --px4-sitl-probe` | Same, but drives the PX4 SITL runtime probe case. |
+| `npm run agent -- "<prompt>"` | One-shot natural-language agent run with streaming output and transcript/report artifacts. |
 | `npm run dashboard` | Starts the local read-only viewer. |
-| `npm run smoke:dashboard` | Verifies dashboard health, job detail, pair listing, bundle pages, artifact fetch, traversal rejection, and blocked mutation methods. |
-| `npm run replay -- bundles/<bundle_id>` | Re-derives the bundle verdict with no LLM; prints `PASS` or `FAIL`. |
+| `npm run replay -- bundles/<bundle_id>` | Re-derives the bundle verdict with no LLM. Prints PASS or FAIL. |
 
-## Repository Map
+## Full reviewer walkthrough
+
+For a 10–15 minute review:
+
+1. **Read this README's opening pitch and the "what this does not claim" list.** Calibrate expectations.
+2. **`npm install && npm run typecheck && npm run smoke:offline`.** Watch the offline smoke pass. It exercises every real evidence path and every honesty assertion (tool allowlist, pair refusal cases, bundle/replay PASS/FAIL on tampered inputs) without calling a model.
+3. **`npm run dashboard`** in another shell. Open `http://127.0.0.1:4108`.
+4. **Inspect a `static-source-evidence` job.** Open `source-context.md`, `commit-info.json`, and `diff.patch` in the artifact preview. Confirm the static-only caveat appears in the result summary.
+5. **Inspect a `mavlink-parser-fuzz` job.** Open `evidence-summary.md` and `parser-outcomes.csv`. Confirm the parser-library-only caveat.
+6. **Inspect a `mavlink-battery-status-runtime-replay` job.** Open `frame-record.hex`, `delivery-record.json`, and `runtime.log`. Note that on a machine without a verified PX4 build, the outcome is `runtime_unavailable` with `firmware_commit_proven: false` — that is the honest local result, not a failure.
+7. **Open a pair page** at `/pair.html?pair_id=<some-pair-id>` from the dashboard list. Note the seven-condition checklist and the explicit `verdict_flip_demonstrated` indicator. Without a verified PX4 build, the indicator is `false` because runtime outcomes are not meaningful — this is the honesty contract working.
+8. **Open the bundles list** at `/bundles.html`. Pick a bundle, open it, copy the replay command from the detail page.
+9. **Run `npm run replay -- bundles/<bundle_id>`.** Note PASS for an untampered bundle. For static-source and parser-fuzz bundles, replay actually re-derives the verdict. For SITL/runtime bundles, replay re-evaluates what it can and reports "Verdict not re-derived; bundled record and re-evaluable signals verified" — that wording is deliberate.
+10. **Optional:** authenticate `pi` with `npx pi` then `/login openai-codex`, run `npm run demo:agent`. Watch the agent orchestrate. Read `agent-runs/<timestamp>/transcript.md` to see the tool sequence the model chose.
+
+The reviewer's working mental model after this walkthrough: the agent orchestrates, the runners produce real artifacts, the pair tool refuses to lie, the bundle + CLI replay verifies independently.
+
+## Repository map
 
 ```text
-data/                         curated cases, methodology cards, pinned PX4 commit aliases
-scripts/                      smoke tests and demo validation scripts
-src/config.ts                 model/runtime constants
-  src/session.ts                pi SDK session setup and system prompt
-  src/agent/                    agent operator run loop and transcript/report writers
-  src/tools/evidence.ts         eight model-facing domain tools
-  src/domain/evidence-bundle.ts bundle packaging for reviewer replay
-  src/replay/                   CLI replay per runner kind (no agent imports)
-src/domain/catalog.ts         case and test-card loading
-src/domain/jobs.ts            job lifecycle, run folders, runner dispatch, cancellation
-src/domain/static-source-evidence.ts
-                              real PX4 static-source evidence implementation
-src/domain/mavlink-parser-fuzz.ts
-                              real pymavlink parser-library fuzz implementation
-src/domain/px4-sitl-probe.ts  real PX4 SITL runtime probe implementation
-src/runners/                  standalone runner entrypoints and Python harness
-src/dashboard/                local read-only dashboard server and static UI
-runs/                         ignored local evidence job artifacts
-agent-runs/                   ignored local agent transcripts and summaries
-.cache/                       ignored PX4 checkout/cache and pymavlink Python venv
+data/                              curated cases, methodology cards, pinned PX4 commit aliases, runner configs
+scripts/                           smoke tests, demo validators, replay CLI entrypoint
+src/config.ts                      model/runtime constants
+src/session.ts                     pi SDK session setup, system prompt, tool allowlist
+src/agent/                         agent operator run loop, transcript/report writers
+src/tools/evidence.ts              eight model-facing domain tools
+src/domain/catalog.ts              case and test-card loading
+src/domain/jobs.ts                 job lifecycle, run folders, runner dispatch, cancellation
+src/domain/static-source-evidence.ts   real PX4 static-source evidence
+src/domain/mavlink-parser-fuzz.ts      real pymavlink parser-library fuzz
+src/domain/px4-sitl-probe.ts          real PX4 SITL runtime probe (preflight helper also reused at replay time)
+src/domain/px4-runtime-replay.ts      real PX4 runtime replay with provenance gate
+src/domain/evidence-pair.ts           pair comparison with seven-condition gate
+src/domain/evidence-bundle.ts         bundle packaging
+src/runners/                       standalone runner entrypoints and Python harnesses
+src/replay/                        CLI replay per runner kind (no agent imports — strict isolation)
+src/dashboard/                     local read-only dashboard server and static UI
+runs/                              ignored: per-job artifacts
+pairs/                             ignored: per-pair JSON artifacts
+bundles/                           ignored: per-bundle packaging
+agent-runs/                        ignored: agent transcripts and summaries
+.cache/                            ignored: PX4 checkout, pymavlink venv
+specs/                             ignored: planning specs (kept local for development history)
 ```
 
-## Suggested Reviewer Walkthrough
+## Limitations and environment requirements
 
-1. Read the “Real vs Fake” table above.
-2. Run `npm run smoke:offline`.
-3. Run `npm run demo:agent` to watch the agent orchestrate evidence and write a transcript.
-4. Run `npm run dashboard` and open the URL.
-5. Select a `static PX4 source evidence` job.
-6. Open `source-context.md` and `diff.patch` in the artifact preview.
-7. Confirm the UI shows the static-only caveat.
-8. Optionally inspect `agent-runs/<timestamp>/transcript.md` to verify the agent drove the tool loop.
+- **Live PX4 runtime requires local build environment.** `npm run smoke:offline` uses `smoke-fast` budget which skips PX4 builds and exercises the runtime-unavailable path stably. For `runtime_observed` from the SITL probe or `runtime_clean` from runtime replay, the machine needs Python 3, build tools (git, cmake, make, g++; ninja recommended), and either a prepared `.cache/px4/build/px4_sitl_default/bin/px4` with a matching build manifest or the bandwidth/time to fetch and build PX4 on first run.
+- **Live `verdict_flip_demonstrated: true` requires verified builds at both commits.** The pair tool's strict gate refuses to claim a flip without `firmware_commit_proven: true` on both sides and meaningful runtime outcomes (not `runtime_unavailable`). The synthetic fixture in offline smoke proves the true-path works on constructed inputs; producing a live true pair is an environment exercise.
+- **Static-source replay needs network for the first PX4 fetch** unless `.cache/px4` is already warm. Subsequent replays of the same commit are offline.
+- **Parser-fuzz replay needs the local venv with the pinned pymavlink version.** Replay refuses with both versions named if the installed pymavlink differs from `pinned_inputs.pymavlink_version`.
+- **Partial replay (SITL probe, runtime replay without verified build) does not prove runtime behavior on its own.** It re-evaluates what it can (preflight, artifact structure, recorded inputs) and says so explicitly in the report — replay output for partial paths never claims "Verdict match."
+- **Dashboard binds to `127.0.0.1` by default.** It assumes trusted local run folders. There is no auth, no signing, no remote-access hardening.
+- **The dashboard UI is functional first.** Visual polish is intentionally deferred.
 
-## Current Limitations
+## Deliberately out of scope
 
-- Four cases have real evidence today: static PX4 source, parser-library fuzz, PX4 SITL runtime probe, and PX4 BATTERY_STATUS runtime replay (one crafted frame observation, not safety proof).
-- Static-source evidence does not execute firmware.
-- Parser-library fuzz uses pymavlink only; it is not PX4 SITL or handler runtime proof.
-- PX4 SITL runtime probe needs Python 3, build tools, and a local PX4 SITL binary for a full runtime-observed result; offline smoke expects the stable runtime-unavailable path when the binary is absent.
-- PX4 BATTERY_STATUS runtime replay needs a verifiable post-patch SITL build manifest (or a fresh build under `local-default`); offline smoke expects `runtime_unavailable` when provenance is missing.
-- PX4 source is fetched from GitHub, so the static-source runner needs network access unless the cache is already warm.
-- The parser fuzz runner needs Python 3 and network access on first run to create the pymavlink venv.
-- The local dashboard assumes trusted local run folders and binds to `127.0.0.1` by default.
-- The dashboard UI is intentionally functional first; visual polish can come later.
+These are named explicitly because their absence is a feature of this PoC, not an oversight:
 
-## Next Engineering Moves
+- **Hardware-attested enclaves for supplier-IP confidentiality.** Round 1 pitched this. The PoC does not build it. The system would sit *inside* such an enclave in a real deployment, with the I/O surface (doc-in, signed-verdict-out, no binary-out) matching what an enclave requires — but the enclave itself is acknowledged as future work.
+- **Behavioral fingerprinting / cross-supplier baseline.** Round 1 also pitched this. Not built. Future work.
+- **Real supplier-confidential documents.** Only public PX4 / MAVLink material is ingested. No NDA-locked content.
+- **Autonomous vulnerability discovery.** The PoC re-discovers known patched bugs to demonstrate the orchestration shape. It does not claim to find new vulnerabilities.
+- **Production scaffolding.** Authentication, secrets management, multi-tenancy, signed bundles, signing keys, attestation chains. Acknowledged; not built.
+- **Multi-agent / orchestrator hierarchy inside the PoC.** One pi session per evidence-gathering run. No PM-Orchestrator-Specialist nesting inside the product; the agent's tool surface is the discipline boundary.
+- **Broad fuzzing harnesses (AFL/libFuzzer/etc.) against PX4 runtime.** Out of scope for this PoC milestone. The parser-library fuzz and runtime replay paths are the bounded, defensible action evidence today.
+- **Cross-machine bundle portability testing.** Bundles are designed to be portable in principle (manifest + artifacts + replay script) but production-grade portability testing is not part of this PoC.
 
-Good next steps are:
-
-1. Extend the PX4 runtime probe with handler-specific checks or bounded runtime fuzz once the SITL path is stable.
-2. Improve dashboard visual design for presentation.
-3. Add a second real runtime case (FTP path handling or telemetry conformance) only after the probe path is stable.
-
-Avoid adding production queue infrastructure, auth, multi-agent hierarchy, or broad AFL/libFuzzer harnesses until the narrow evidence loop has earned it.
+The combination of "what this proves" plus "deliberately out of scope" is the PoC's defensible footprint. A reviewer should leave with both halves of that picture.
