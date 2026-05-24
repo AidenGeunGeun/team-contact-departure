@@ -7,6 +7,8 @@ import { type EvidenceResult, type JobEvent, type JobState, type JobStatus } fro
 import { type EvidencePairRecord } from "../domain/evidence-pair.js";
 import { BUNDLES_ROOT } from "../domain/evidence-bundle.js";
 import type { BundleManifest } from "../replay/types.js";
+import { operatorDemoPrompt, operatorSessionManager } from "../operator/session-manager.js";
+import { AGENT_AUTH_INSTRUCTION } from "../agent/run.js";
 
 interface DashboardJobRecord {
   job_id?: unknown;
@@ -540,9 +542,21 @@ function sendNotFound(response: ServerResponse): void {
   sendJson(response, 404, { error: "not_found" });
 }
 
-function sendMethodNotAllowed(response: ServerResponse): void {
-  response.writeHead(405, { allow: "GET", "content-type": "application/json; charset=utf-8" });
-  response.end(`${JSON.stringify({ error: "read_only_dashboard" })}\n`);
+function sendMethodNotAllowed(response: ServerResponse, allow = "GET"): void {
+  response.writeHead(405, { allow, "content-type": "application/json; charset=utf-8" });
+  response.end(`${JSON.stringify({ error: "method_not_allowed" })}\n`);
+}
+
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) {
+    return {};
+  }
+  return JSON.parse(raw) as unknown;
 }
 
 async function serveStatic(requestPath: string, response: ServerResponse): Promise<void> {
@@ -564,7 +578,70 @@ async function serveStatic(requestPath: string, response: ServerResponse): Promi
   createReadStream(candidate).pipe(response);
 }
 
-async function handleApi(url: URL, response: ServerResponse): Promise<void> {
+async function handleOperatorApi(
+  request: IncomingMessage,
+  url: URL,
+  response: ServerResponse,
+): Promise<void> {
+  if (url.pathname === "/api/operator/config" && request.method === "GET") {
+    sendJson(response, 200, {
+      product_name: "Contact Departure",
+      demo_prompt: operatorDemoPrompt(),
+      auth_recovery: AGENT_AUTH_INSTRUCTION,
+      stop_available: false,
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/operator/state" && request.method === "GET") {
+    sendJson(response, 200, { state: operatorSessionManager.getState() });
+    return;
+  }
+
+  if (url.pathname === "/api/operator/events" && request.method === "GET") {
+    operatorSessionManager.subscribe(response);
+    return;
+  }
+
+  if (url.pathname === "/api/operator/prompt" && request.method === "POST") {
+    let body: unknown;
+    try {
+      body = await readJsonBody(request);
+    } catch {
+      sendJson(response, 400, { error: "invalid_json" });
+      return;
+    }
+    const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    const prompt = typeof record.prompt === "string" ? record.prompt : "";
+    const stub = record.stub === true || process.env.CONTACT_OPERATOR_SMOKE_STUB === "1";
+    const result = await operatorSessionManager.submitPrompt(prompt, { stub });
+    if (!result.accepted) {
+      sendJson(response, 409, { error: result.reason ?? "not_accepted", state: operatorSessionManager.getState() });
+      return;
+    }
+    sendJson(response, 202, { accepted: true, state: operatorSessionManager.getState() });
+    return;
+  }
+
+  if (url.pathname === "/api/operator/select-job" && request.method === "POST") {
+    let body: unknown;
+    try {
+      body = await readJsonBody(request);
+    } catch {
+      sendJson(response, 400, { error: "invalid_json" });
+      return;
+    }
+    const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    const jobId = typeof record.job_id === "string" ? record.job_id : undefined;
+    operatorSessionManager.selectJob(jobId);
+    sendJson(response, 200, { ok: true, state: operatorSessionManager.getState() });
+    return;
+  }
+
+  sendNotFound(response);
+}
+
+async function handleApi(request: IncomingMessage, url: URL, response: ServerResponse): Promise<void> {
   const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (url.pathname === "/api/health") {
     const runsAvailable = await pathExists(RUNS_ROOT);
@@ -573,6 +650,8 @@ async function handleApi(url: URL, response: ServerResponse): Promise<void> {
       runs_dir: RUNS_ROOT,
       runs_available: runsAvailable,
       read_only: true,
+      operator: true,
+      operator_state: operatorSessionManager.getState().phase,
     });
     return;
   }
@@ -693,19 +772,29 @@ async function handleApi(url: URL, response: ServerResponse): Promise<void> {
 
 async function requestHandler(request: IncomingMessage, response: ServerResponse): Promise<void> {
   try {
-    if (request.method !== "GET") {
-      sendMethodNotAllowed(response);
-      return;
-    }
-
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? `${DEFAULT_HOST}:${DEFAULT_PORT}`}`);
     if (url.pathname === "/favicon.ico") {
       response.writeHead(204, { "cache-control": "no-store" });
       response.end();
       return;
     }
+
+    if (url.pathname.startsWith("/api/operator/")) {
+      if (request.method !== "GET" && request.method !== "POST") {
+        sendMethodNotAllowed(response, "GET, POST");
+        return;
+      }
+      await handleOperatorApi(request, url, response);
+      return;
+    }
+
+    if (request.method !== "GET") {
+      sendMethodNotAllowed(response);
+      return;
+    }
+
     if (url.pathname.startsWith("/api/")) {
-      await handleApi(url, response);
+      await handleApi(request, url, response);
       return;
     }
     await serveStatic(url.pathname, response);
@@ -734,7 +823,7 @@ export function startDashboardServer(options: { port?: number; host?: string } =
 
 async function main(): Promise<void> {
   const { url } = await startDashboardServer();
-  console.log(`Contact Departure dashboard: ${url}`);
+  console.log(`Contact Departure operator UI: ${url}`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

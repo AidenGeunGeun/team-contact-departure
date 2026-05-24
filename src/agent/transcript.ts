@@ -32,6 +32,27 @@ function formatTimestamp(date: Date): string {
   return date.toISOString().replace(/[:.]/g, "-");
 }
 
+const JOB_ID_PATTERN = /job-[A-Za-z0-9_-]+/g;
+
+function extractJobIdsFromValue(value: unknown): string[] {
+  if (typeof value === "string") {
+    return [...new Set(value.match(JOB_ID_PATTERN) ?? [])];
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const chunks = [
+      record.stdout,
+      record.output,
+      record.details,
+      record.job_id,
+    ]
+      .filter((entry): entry is string => typeof entry === "string")
+      .join("\n");
+    return [...new Set(chunks.match(JOB_ID_PATTERN) ?? [])];
+  }
+  return [];
+}
+
 function extractJobId(toolName: string, args: unknown, result: unknown): string | undefined {
   if (toolName === "launch_evidence_job" && result && typeof result === "object" && "job_id" in result) {
     const jobId = (result as { job_id?: unknown }).job_id;
@@ -40,6 +61,20 @@ function extractJobId(toolName: string, args: unknown, result: unknown): string 
   if (toolName === "inspect_job" && args && typeof args === "object" && "job_id" in args) {
     const jobId = (args as { job_id?: unknown }).job_id;
     return typeof jobId === "string" ? jobId : undefined;
+  }
+  if (toolName === "bash") {
+    const fromResult = extractJobIdsFromValue(result);
+    if (fromResult.length > 0) {
+      return fromResult[0];
+    }
+    const command =
+      typeof args === "string"
+        ? args
+        : args && typeof args === "object" && "command" in args
+          ? (args as { command?: unknown }).command
+          : undefined;
+    const fromCommand = typeof command === "string" ? extractJobIdsFromValue(command) : [];
+    return fromCommand[0];
   }
   return undefined;
 }
