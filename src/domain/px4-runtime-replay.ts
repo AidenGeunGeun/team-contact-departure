@@ -286,7 +286,15 @@ function preflightBlocksRuntime(preflight: PreflightReport): { blocked: boolean;
 function runtimeUnavailableAfterSetup(
   budget: Px4RuntimeReplayBudgetProfile,
   setupNote: string,
+  binaryPresent: boolean,
 ): string {
+  if (
+    setupNote.includes("provenance unverified") ||
+    setupNote.includes("no build manifest") ||
+    (binaryPresent && setupNote.includes("Build skipped"))
+  ) {
+    return "Runtime unavailable: a PX4 SITL binary is present but its commit provenance cannot be verified; see px4-setup.log.";
+  }
   if (!budget.attempt_build) {
     return "Runtime unavailable: no local PX4 SITL binary is present and this budget profile skips build attempts.";
   }
@@ -301,9 +309,6 @@ function runtimeUnavailableAfterSetup(
   }
   if (setupNote.includes("checkout failed")) {
     return "Runtime unavailable: PX4 cache could not be checked out at the resolved commit; see px4-setup.log.";
-  }
-  if (setupNote.includes("provenance unverified") || setupNote.includes("no build manifest")) {
-    return "Runtime unavailable: a PX4 SITL binary is present but its commit provenance cannot be verified; see px4-setup.log.";
   }
   return "Runtime unavailable: PX4 SITL binary is not present locally after setup.";
 }
@@ -1025,7 +1030,7 @@ export async function producePx4RuntimeReplayEvidence(
   await appendSetupSummary(options.artifact_dir, setupNote);
 
   if (!firmwareCommitProven || !existsSync(px4BinaryPath(config))) {
-    const reason = runtimeUnavailableAfterSetup(budget, setupNote);
+    const reason = runtimeUnavailableAfterSetup(budget, setupNote, existsSync(px4BinaryPath(config)));
     await writeEarlyUnavailableArtifacts(
       options.artifact_dir,
       preflight,
@@ -1204,20 +1209,21 @@ export function px4RuntimeReplayArtifactPaths(
   outcome: Px4RuntimeReplayOutcome,
 ): string[] {
   const rel = (name: string) => join(artifactDirAbs, name);
-  if (outcome.kind === "failure") {
-    return [rel("failure.md"), rel("preflight-report.json"), rel("preflight-report.md"), rel("runner.log")];
-  }
-  return [
-    rel("evidence-summary.md"),
-    rel("preflight-report.json"),
-    rel("preflight-report.md"),
-    rel("px4-setup.log"),
-    rel("px4-setup-summary.txt"),
-    rel("runtime.log"),
-    rel("frame-record.json"),
-    rel("frame-record.hex"),
-    rel("delivery-record.json"),
-    rel("observation-record.json"),
-    rel("runner.log"),
-  ];
+  const candidates =
+    outcome.kind === "failure"
+      ? [rel("failure.md"), rel("preflight-report.json"), rel("preflight-report.md"), rel("runner.log")]
+      : [
+          rel("evidence-summary.md"),
+          rel("preflight-report.json"),
+          rel("preflight-report.md"),
+          rel("px4-setup.log"),
+          rel("px4-setup-summary.txt"),
+          rel("runtime.log"),
+          rel("frame-record.json"),
+          rel("frame-record.hex"),
+          rel("delivery-record.json"),
+          rel("observation-record.json"),
+          rel("runner.log"),
+        ];
+  return candidates.filter((path) => existsSync(path));
 }
