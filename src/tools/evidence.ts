@@ -133,7 +133,7 @@ function formatLaunch(details: JobLaunchDetails): string {
   if (details.runner?.process) {
     lines.push(`Runner process: pid ${details.runner.process.pid} (${details.runner.process.entrypoint}).`);
   }
-  lines.push("Use inspect_job with the job_id to view progress and results.");
+  lines.push("Next: npm run contact -- watch <job_id> to view progress and results.");
   return lines.join("\n");
 }
 

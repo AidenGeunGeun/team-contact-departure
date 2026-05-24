@@ -6,9 +6,8 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import type { JobInspectionDetails, JobLaunchDetails, RunnerKind } from "../src/domain/jobs.js";
 import { resolvePostPatchCommitHash, resolvePrePatchCommitHash } from "../src/domain/px4-runtime-replay.js";
-import { createContactDepartureSession } from "../src/session.js";
+import { createContactDepartureSession, PRIMITIVE_TOOL_NAMES } from "../src/session.js";
 import {
-  DOMAIN_TOOL_NAMES,
   runCancelJob,
   runCompareEvidencePair,
   runCreateEvidenceBundle,
@@ -19,7 +18,17 @@ import {
   runLoadCase,
 } from "../src/tools/evidence.js";
 
-const expectedTools = [...DOMAIN_TOOL_NAMES].sort();
+const expectedTools = [...PRIMITIVE_TOOL_NAMES].sort();
+const blockedDomainTools = [
+  "list_cases",
+  "load_case",
+  "list_test_cards",
+  "launch_evidence_job",
+  "inspect_job",
+  "cancel_job",
+  "compare_evidence_pair",
+  "create_evidence_bundle",
+] as const;
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 const jobsModuleUrl = new URL("../src/domain/jobs.ts", import.meta.url).href;
 const terminalStates = new Set(["succeeded", "failed", "cancelled"]);
@@ -1298,10 +1307,42 @@ try {
 
   assert.deepEqual(activeTools, expectedTools);
   assert.deepEqual(configuredTools, expectedTools);
-  for (const blockedTool of ["bash", "read", "write", "edit", "grep", "find", "ls"]) {
+  for (const blockedTool of blockedDomainTools) {
     assert.equal((activeTools as readonly string[]).includes(blockedTool), false, `${blockedTool} must not be active`);
     assert.equal((configuredTools as readonly string[]).includes(blockedTool), false, `${blockedTool} must not be configured`);
   }
+  for (const primitive of PRIMITIVE_TOOL_NAMES) {
+    assert.equal((activeTools as readonly string[]).includes(primitive), true, `${primitive} must be active`);
+  }
+
+  // ---- Project CLI -----------------------------------------------------------
+
+  function runContactCli(args: string[]): { status: number | null; stdout: string; stderr: string } {
+    return spawnSync("npm", ["run", "contact", "--", ...args], {
+      cwd: repoRoot,
+      env: smokeChildEnv(),
+      encoding: "utf8",
+    });
+  }
+
+  const help = runContactCli(["help"]);
+  assert.equal(help.status, 0, "contact help must exit 0");
+  assert.match(help.stdout + help.stderr, /npm run contact -- cases/, "contact help must document cases command");
+
+  const casesCli = runContactCli(["cases"]);
+  assert.equal(casesCli.status, 0, "contact cases must exit 0");
+  assert.match(casesCli.stdout, /mavlink-battery-status-bounds/, "contact cases must list curated cases");
+
+  const showCli = runContactCli(["show", "mavlink-battery-status-bounds"]);
+  assert.equal(showCli.status, 0, "contact show must exit 0");
+  assert.match(showCli.stdout, /Recommended commands/, "contact show must print command examples");
+
+  const invalidRun = runContactCli(["run", "mavlink-battery-status-bounds"]);
+  assert.notEqual(invalidRun.status, 0, "contact run without flags must exit non-zero");
+  assert.match(invalidRun.stderr, /Missing --target/, "contact run must report missing target");
+
+  const invalidCase = runContactCli(["show", "not-a-real-case"]);
+  assert.notEqual(invalidCase.status, 0, "contact show unknown case must exit non-zero");
 
   console.log(
     JSON.stringify(

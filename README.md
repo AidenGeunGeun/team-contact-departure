@@ -1,13 +1,13 @@
 # Contact Departure
 
-**An AI agent that orchestrates firmware-evidence work without judging the evidence itself.**
+**An AI agent with normal workspace autonomy inside a bounded evidence project.**
 
 Contact Departure is a proof of concept for Airbus Fly Your Ideas 2026. It demonstrates a defensible answer to a real problem in aerospace supplier review: how to use AI in firmware verification without letting an LLM be the security judge.
 
 The pitch is three sentences:
 
-- **AI proposes.** The agent reads curated supplier-style cases, picks a methodology, launches a constrained evidence job, and summarizes what happened.
-- **Evidence disposes.** The agent does not decide outcomes. Real runners produce real artifacts at pinned firmware commits; outcomes come from what the firmware actually did.
+- **AI proposes.** The agent reads curated supplier-style cases, launches constrained evidence jobs through the project CLI, watches diagnostics, and writes reasoned judgments.
+- **Evidence disposes.** Evidence authority is not the agent's confidence. Real runners produce real artifacts at pinned firmware commits; outcomes come from what the firmware actually did.
 - **Replay verifies.** Any completed job or pair can be packaged into a bundle. A reviewer runs one CLI command and re-derives the recorded verdict with no LLM in the loop.
 
 That contract is enforceable in code, not just claimed in slides.
@@ -17,24 +17,25 @@ That contract is enforceable in code, not just claimed in slides.
 1. [What this proves and does not claim](#what-this-proves-and-does-not-claim)
 2. [60-second walkthrough](#60-second-walkthrough)
 3. [Architecture in one paragraph](#architecture-in-one-paragraph)
-4. [The agent tool surface (eight tools)](#the-agent-tool-surface-eight-tools)
-5. [Evidence cases](#evidence-cases)
-6. [The verdict flip demonstration](#the-verdict-flip-demonstration)
-7. [Replayable evidence bundles](#replayable-evidence-bundles)
-8. [Per-runner detail](#per-runner-detail)
-9. [Dashboard](#dashboard)
-10. [Folder contract](#folder-contract)
-11. [Commands reference](#commands-reference)
-12. [Full reviewer walkthrough](#full-reviewer-walkthrough)
-13. [Repository map](#repository-map)
-14. [Limitations and environment requirements](#limitations-and-environment-requirements)
-15. [Deliberately out of scope](#deliberately-out-of-scope)
+4. [Autonomy inside the boundary](#autonomy-inside-the-boundary)
+5. [Project CLI](#project-cli)
+6. [Evidence cases](#evidence-cases)
+7. [The verdict flip demonstration](#the-verdict-flip-demonstration)
+8. [Replayable evidence bundles](#replayable-evidence-bundles)
+9. [Per-runner detail](#per-runner-detail)
+10. [Dashboard](#dashboard)
+11. [Folder contract](#folder-contract)
+12. [Commands reference](#commands-reference)
+13. [Full reviewer walkthrough](#full-reviewer-walkthrough)
+14. [Repository map](#repository-map)
+15. [Limitations and environment requirements](#limitations-and-environment-requirements)
+16. [Deliberately out of scope](#deliberately-out-of-scope)
 
 ## What this proves and does not claim
 
 **Proves:**
 
-- A general coding agent can be narrowed into a domain evidence agent by exposing only project-specific tools (no shell, no file access, no grep).
+- A Pi agent can operate autonomously inside a bounded project sandbox with normal workspace tools (read, write, edit, bash, grep, find, ls) while evidence operations go through a project CLI.
 - Real PX4 source evidence can be produced at pinned upstream commits and inspected by reviewers.
 - A real MAVLink parser-library fuzz runner can exercise pymavlink against mutated frames and capture outcomes.
 - A real PX4 SITL runtime probe can either boot PX4 and observe MAVLink behavior or honestly report why the local environment could not.
@@ -57,14 +58,20 @@ That contract is enforceable in code, not just claimed in slides.
 npm install
 npm run typecheck
 npm run smoke:offline
-npm run dashboard
+npm run agent
 ```
 
 That sequence:
 
-- Verifies the agent's tool surface contains exactly the eight domain tools (no shell escape).
-- Exercises the full job lifecycle, real static-source evidence, real parser-fuzz evidence, real PX4 SITL probe (graceful runtime-unavailable on machines without a built PX4), real PX4 runtime replay (pre and post), pair comparison, and bundle creation + replay with PASS/FAIL assertions.
-- Starts a read-only dashboard at `http://127.0.0.1:4108` where you can inspect jobs, pair artifacts, and bundles.
+- Verifies the agent's tool surface exposes Pi workspace primitives (read, write, edit, bash, grep, find, ls) and not the legacy eight domain tools.
+- Exercises the project CLI (`npm run contact -- ...`) and the full job lifecycle, real static-source evidence, real parser-fuzz evidence, real PX4 SITL probe (graceful runtime-unavailable on machines without a built PX4), real PX4 runtime replay (pre and post), pair comparison, and bundle creation + replay with PASS/FAIL assertions.
+
+The primary interface is Pi TUI / chat plus the project CLI. To inspect artifacts passively:
+
+```bash
+npm run dashboard
+# default: http://127.0.0.1:4108
+```
 
 To watch the agent actually orchestrate (requires one-time `openai-codex` auth via `npx pi` then `/login openai-codex`):
 
@@ -76,22 +83,54 @@ The default model is `openai-codex/gpt-5.5` with thinking `xhigh`, using the Cha
 
 ## Architecture in one paragraph
 
-The agent runs in a pi SDK session with `tools: [...DOMAIN_TOOL_NAMES]` — pi's built-in coding tools (`bash`, `read`, `write`, `edit`, `grep`, `find`, `ls`) are not exposed. The eight domain tools let the model list cases, load a case, list methodology cards, launch a non-blocking evidence job, inspect a job, cancel a job, compare two completed jobs into a pair artifact, and create a replay bundle from a completed job or pair. Runners execute as detached child processes writing to `runs/<job_id>/`. The dashboard and the agent both read the same artifacts. Bundle creation packages those artifacts into `bundles/<bundle_id>/` with a manifest and a runner-specific replay script under `src/replay/` (which has zero agent/session/LLM imports). A reviewer runs `npm run replay -- <bundle_path>` and gets PASS or FAIL with no model involvement.
+The agent runs in a Pi SDK session with workspace primitives: `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls`. Evidence operations (list cases, launch jobs, watch progress, pair jobs, create bundles) go through `npm run contact -- ...`, invoked via bash. The agent freely reads project source, data catalogs, job artifacts, pair artifacts, bundles, and specs; writes analyst judgments under `agent-judgments/` or `agent-runs/`; and debugs failures by reading logs and rerunning commands. Runners execute as detached child processes writing to `runs/<job_id>/`. The dashboard is a passive artifact viewer over the same folders. Bundle creation packages artifacts into `bundles/<bundle_id>/` with a manifest and a runner-specific replay script under `src/replay/` (which has zero agent/session/LLM imports). A reviewer runs `npm run replay -- <bundle_path>` and gets PASS or FAIL with no model involvement.
 
-## The agent tool surface (eight tools)
+## Autonomy inside the boundary
 
-| Tool | Purpose |
+Contact Departure gives the agent normal developer autonomy inside the project/pod sandbox. The boundary is enforced by the environment and the project CLI, not by asking the model to behave.
+
+The agent may read, search, edit notes, run commands, watch jobs, and write reasoned judgments. It may not be treated as the authority on firmware safety. Evidence authority comes from runner artifacts, structural checks, replayable bundles, and human review — not from the agent's prose or confidence.
+
+If replay or structural checks disagree with an agent judgment, that disagreement should surface as a human-review flag.
+
+## Project CLI
+
+Evidence operations are exposed through the project CLI, not as separate LLM tools:
+
+```bash
+npm run contact -- help
+npm run contact -- cases
+npm run contact -- show <case>
+npm run contact -- run <case> --target <target> --mode <mode>
+npm run contact -- jobs
+npm run contact -- job <job_id>
+npm run contact -- watch <job_id>
+npm run contact -- cancel <job_id>
+npm run contact -- pair <job_id_a> <job_id_b>
+npm run contact -- bundle <job_or_pair_id>
+```
+
+User-facing flags hide internal plumbing:
+
+| CLI flag | Meaning |
 | --- | --- |
-| `list_cases` | Show curated evidence cases. |
-| `load_case` | Load the exact public-doc snippet and constraints for one case. |
-| `list_test_cards` | Show available methodology cards. |
-| `launch_evidence_job` | Start a non-blocking evidence job and return a job id. |
-| `inspect_job` | Read job status, progress, events, result, and artifact paths. |
-| `cancel_job` | Stop a queued or running evidence job. |
-| `compare_evidence_pair` | Compare two completed pre/post jobs (same case, card, budget) and write a pair artifact with role detection from commit hashes, frame byte equality, provenance conditions, and a strict `verdict_flip_demonstrated` field. |
-| `create_evidence_bundle` | Package a completed job or pair into `bundles/<bundle_id>/` with manifest, embedded artifacts, replay script, and reviewer README. Reads existing results only. |
+| `--target pre` / `post` | Maps to pinned PX4 aliases for static-source and runtime-replay cases |
+| `--target demo` | Case-appropriate demo run label for probe, fuzz, and fake-smoke cases |
+| `--mode smoke` | `smoke-fast` budget profile |
+| `--mode local` | `local-default` budget profile |
+| `--mode asan` | `asan-default` budget profile (ASan/UBSan builds when supported) |
 
-This is the core difference from "just ask a coding agent to run commands." The model chooses among domain methods; it does not receive an arbitrary command surface.
+Methodology card selection is automatic for known cases unless `--card` is passed explicitly.
+
+Example workflow the agent should follow:
+
+```bash
+npm run contact -- show mavlink-battery-status-bounds
+npm run contact -- run mavlink-battery-status-bounds --target post --mode smoke
+npm run contact -- watch job-...
+npm run contact -- job job-...
+npm run contact -- bundle job-...
+```
 
 ## Evidence cases
 
@@ -106,7 +145,13 @@ This is the core difference from "just ask a coding agent to run commands." The 
 
 ## The verdict flip demonstration
 
-This is the headline. Same case, same methodology card, same crafted MAVLink frame, same budget profile. Only the pinned PX4 commit changes between pre-patch (`mavlink-battery-status-bounds-pre`) and post-patch (`mavlink-battery-status-bounds-post`). The agent launches two replay jobs and then calls `compare_evidence_pair` with the completed job IDs.
+This is the headline. Same case, same methodology card, same crafted MAVLink frame, same budget profile. Only the pinned PX4 commit changes between pre-patch (`mavlink-battery-status-bounds-pre`) and post-patch (`mavlink-battery-status-bounds-post`). Launch two replay jobs via the CLI and pair them:
+
+```bash
+npm run contact -- run mavlink-battery-status-runtime-replay --target pre --mode smoke
+npm run contact -- run mavlink-battery-status-runtime-replay --target post --mode smoke
+npm run contact -- pair <pre_job_id> <post_job_id>
+```
 
 **The pair tool refuses to write any artifact** when the pair is structurally invalid:
 
@@ -136,7 +181,7 @@ This is one firmware-driven runtime difference against one crafted frame. It is 
 
 ## Replayable evidence bundles
 
-A reviewer should not have to trust the agent's summary. After a job or pair reaches a terminal state, the agent can call `create_evidence_bundle` to write:
+A reviewer should not have to trust the agent's summary. After a job or pair reaches a terminal state, package it with the CLI:
 
 ```text
 bundles/<bundle_id>/manifest.json   # canonical record (schema_version 1)
@@ -198,7 +243,7 @@ Demo scaffold only. Job lifecycle, status files, events, cancellation, dashboard
 
 ## Dashboard
 
-Read-only local viewer over run folders, pair artifacts, and bundles.
+Passive read-only artifact viewer over run folders, pair artifacts, and bundles. It is secondary to Pi TUI / chat plus the project CLI.
 
 ```bash
 npm run dashboard
@@ -237,21 +282,25 @@ bundles/<bundle_id>/result.json
 bundles/<bundle_id>/artifacts/*
 bundles/<bundle_id>/replay.sh
 bundles/<bundle_id>/README.md
+agent-judgments/                   ignored: agent analyst notes
 agent-runs/<timestamp>/transcript.md
 agent-runs/<timestamp>/summary.json
 ```
 
-`runs/`, `pairs/`, `bundles/`, `agent-runs/`, and `.cache/` are gitignored. The agent tools, runner processes, smoke tests, dashboard, and replay CLI all read the same contract.
+`runs/`, `pairs/`, `bundles/`, `agent-judgments/`, `agent-runs/`, and `.cache/` are gitignored. The project CLI, runner processes, smoke tests, dashboard, and replay CLI all read the same contract.
 
 ## Commands reference
 
 | Command | What it proves |
 | --- | --- |
 | `npm run typecheck` | TypeScript compiles. |
-| `npm run smoke:offline` | Tool allowlist (eight tools, no shell escape), job lifecycle, all four real runners, fake runners, pair comparison (including same-role/case-mismatch/budget-mismatch/mixed-sanitizer/frame-mismatch refusal and synthetic `verdict_flip_demonstrated: true` fixtures with eight-condition gate), bundle creation and replay (including pymavlink-mismatch, static-commit-mismatch, runtime-replay-sanitizer-mismatch, pair-frame-tamper, and tampered-verdict FAIL fixtures), cancellation, and artifacts work without model calls. |
+| `npm run smoke:offline` | Tool surface (Pi primitives, no legacy domain tools), project CLI checks, job lifecycle, all four real runners, fake runners, pair comparison (including refusal paths and synthetic `verdict_flip_demonstrated: true` fixtures), bundle creation and replay (including mismatch/tamper FAIL fixtures), cancellation, and artifacts work without model calls. |
 | `npm run smoke:operator` | Agent transcript/report formatting works without model calls. |
 | `npm run smoke:dashboard` | Dashboard health, job detail, pair list and detail API, bundle list and detail pages, artifact fetch, traversal rejection, blocked mutation methods. |
-| `npm run demo:agent` | The product-facing agent orchestrates the parser-bounds case end to end and writes a transcript. Requires `openai-codex` auth. |
+| `npm run contact -- help` | Project CLI help and command surface. |
+| `npm run contact -- cases` | List curated evidence cases in plain language. |
+| `npm run contact -- run <case> --target <target> --mode <mode>` | Launch an evidence job; print job id and next watch command. |
+| `npm run demo:agent` | The product-facing agent orchestrates a case end to end using bash and the project CLI; writes a transcript. Requires `openai-codex` auth. |
 | `npm run demo:agent -- --parser-fuzz` | Same, but drives the parser-library fuzz case. |
 | `npm run demo:agent -- --px4-sitl-probe` | Same, but drives the PX4 SITL runtime probe case. |
 | `npm run agent -- "<prompt>"` | One-shot natural-language agent run with streaming output and transcript/report artifacts. |
@@ -263,7 +312,7 @@ agent-runs/<timestamp>/summary.json
 For a 10–15 minute review:
 
 1. **Read this README's opening pitch and the "what this does not claim" list.** Calibrate expectations.
-2. **`npm install && npm run typecheck && npm run smoke:offline`.** Watch the offline smoke pass. It exercises every real evidence path and every honesty assertion (tool allowlist, pair refusal cases, bundle/replay PASS/FAIL on tampered inputs) without calling a model.
+2. **`npm install && npm run typecheck && npm run smoke:offline`.** Watch the offline smoke pass. It exercises every real evidence path, the project CLI, Pi primitive tool surface, pair refusal cases, and bundle/replay PASS/FAIL on tampered inputs without calling a model.
 3. **`npm run dashboard`** in another shell. Open `http://127.0.0.1:4108`.
 4. **Inspect a `static-source-evidence` job.** Open `source-context.md`, `commit-info.json`, and `diff.patch` in the artifact preview. Confirm the static-only caveat appears in the result summary.
 5. **Inspect a `mavlink-parser-fuzz` job.** Open `evidence-summary.md` and `parser-outcomes.csv`. Confirm the parser-library-only caveat.
@@ -271,19 +320,20 @@ For a 10–15 minute review:
 7. **Open a pair page** at `/pair.html?pair_id=<some-pair-id>` from the dashboard list. Note the eight-condition checklist and the explicit `verdict_flip_demonstrated` indicator. Without a verified PX4 build, the indicator is `false` because runtime outcomes are not meaningful — this is the honesty contract working.
 8. **Open the bundles list** at `/bundles.html`. Pick a bundle, open it, copy the replay command from the detail page.
 9. **Run `npm run replay -- bundles/<bundle_id>`.** Note PASS for an untampered bundle. For static-source and parser-fuzz bundles, replay actually re-derives the verdict. For SITL/runtime bundles, replay re-evaluates what it can and reports "Verdict not re-derived; bundled record and re-evaluable signals verified" — that wording is deliberate.
-10. **Optional:** authenticate `pi` with `npx pi` then `/login openai-codex`, run `npm run demo:agent`. Watch the agent orchestrate. Read `agent-runs/<timestamp>/transcript.md` to see the tool sequence the model chose.
+10. **Optional:** authenticate `pi` with `npx pi` then `/login openai-codex`, run `npm run demo:agent`. Watch the agent use bash and `npm run contact -- ...` to orchestrate evidence work. Read `agent-runs/<timestamp>/transcript.md` to see the tool sequence the model chose.
 
-The reviewer's working mental model after this walkthrough: the agent orchestrates, the runners produce real artifacts, the pair tool refuses to lie, the bundle + CLI replay verifies independently.
+The reviewer's working mental model after this walkthrough: the agent operates autonomously inside the sandbox, the project CLI launches evidence work, the runners produce real artifacts, the pair tool refuses to lie, and bundle + CLI replay verifies independently.
 
 ## Repository map
 
 ```text
 data/                              curated cases, methodology cards, pinned PX4 commit aliases, runner configs
-scripts/                           smoke tests, demo validators, replay CLI entrypoint
+scripts/                           smoke tests, demo validators, replay and contact CLI entrypoints
 src/config.ts                      model/runtime constants
-src/session.ts                     pi SDK session setup, system prompt, tool allowlist
+src/session.ts                     pi SDK session setup, system prompt, primitive tool allowlist
+src/cli/contact.ts                 project CLI for evidence operations
 src/agent/                         agent operator run loop, transcript/report writers
-src/tools/evidence.ts              eight model-facing domain tools
+src/tools/evidence.ts              domain operation helpers (used by CLI and smoke tests)
 src/domain/catalog.ts              case and test-card loading
 src/domain/jobs.ts                 job lifecycle, run folders, runner dispatch, cancellation
 src/domain/static-source-evidence.ts   real PX4 static-source evidence
@@ -322,7 +372,7 @@ These are named explicitly because their absence is a feature of this PoC, not a
 - **Real supplier-confidential documents.** Only public PX4 / MAVLink material is ingested. No NDA-locked content.
 - **Autonomous vulnerability discovery.** The PoC re-discovers known patched bugs to demonstrate the orchestration shape. It does not claim to find new vulnerabilities.
 - **Production scaffolding.** Authentication, secrets management, multi-tenancy, signed bundles, signing keys, attestation chains. Acknowledged; not built.
-- **Multi-agent / orchestrator hierarchy inside the PoC.** One pi session per evidence-gathering run. No PM-Orchestrator-Specialist nesting inside the product; the agent's tool surface is the discipline boundary.
+- **Multi-agent / orchestrator hierarchy inside the PoC.** One pi session per evidence-gathering run. No PM-Orchestrator-Specialist nesting inside the product; the sandbox boundary and project CLI enforce discipline.
 - **Broad fuzzing harnesses (AFL/libFuzzer/etc.) against PX4 runtime.** Out of scope for this PoC milestone. The parser-library fuzz and runtime replay paths are the bounded, defensible action evidence today.
 - **Cross-machine bundle portability testing.** Bundles are designed to be portable in principle (manifest + artifacts + replay script) but production-grade portability testing is not part of this PoC.
 
