@@ -34,7 +34,7 @@ npm run demo:agent
 npm run dashboard
 ```
 
-1. Run `npm run demo:agent` to watch the agent orchestrate evidence work with the seven domain tools.
+1. Run `npm run demo:agent` to watch the agent orchestrate evidence work with the eight domain tools.
 2. Run `npm run dashboard` to inspect the evidence jobs and artifacts the agent created.
 
 `demo:agent` requires one-time pi auth for `openai-codex`:
@@ -118,6 +118,7 @@ The only active model-facing tools are:
 | `inspect_job` | Read job status, progress, events, result, and artifact paths. |
 | `cancel_job` | Stop a queued or running evidence job. |
 | `compare_evidence_pair` | Compare two completed pre/post jobs and write a pair artifact with role, frame, and provenance fields. |
+| `create_evidence_bundle` | Package a completed job or pair into `bundles/<bundle_id>/` with manifest, artifacts, and a reviewer replay command. Reads existing results only. |
 
 This is the core difference from “just ask a coding agent to run commands.” The model chooses among domain methods; it does not receive an arbitrary command surface.
 
@@ -147,7 +148,8 @@ This is the core difference from “just ask a coding agent to run commands.” 
 | Area | Real today | Fake / scaffold today |
 | --- | --- | --- |
 | Agent harness | Real pi SDK session using GPT-5.5 via `openai-codex`. | None. |
-| Tool restrictions | Real allowlist: only seven domain tools exposed. | None. |
+| Tool restrictions | Real allowlist: only eight domain tools exposed. | None. |
+| Replayable evidence bundles | Real `create_evidence_bundle` packages completed jobs/pairs; `npm run replay` re-derives verdicts with no LLM. | Full replay requires warm PX4 cache or pymavlink venv; partial replay kinds verify artifacts only and do not prove runtime behavior on their own. |
 | Job lifecycle | Real detached runner processes, status files, events, cancellation. | Runner outputs may be fake depending on case. |
 | Parser-bounds case | Real PX4 source fetch, real pinned commits, real source context, real diff. | Static-only; no runtime execution. |
 | Parser-library fuzz case | Real pymavlink install, real seed generation, real mutations, real parser outcomes. | Parser-library only; not PX4 SITL or firmware runtime proof. |
@@ -246,6 +248,37 @@ The agent launches the two replay jobs and then calls `compare_evidence_pair` wi
 
 This is one firmware-driven runtime difference against one crafted frame. It is not a vulnerability discovery and not a safety claim. The outcome comes from what PX4 actually does at runtime; the runner does not hardcode pre-patch as anomalous or post-patch as clean.
 
+## Replayable Evidence Bundles
+
+A reviewer should not have to trust the agent summary alone. After a job or pair reaches a terminal state, the agent can call `create_evidence_bundle` to write a self-contained directory under `bundles/<bundle_id>/`:
+
+```text
+bundles/<bundle_id>/manifest.json   # canonical record (schema_version 1)
+bundles/<bundle_id>/result.json    # copy of the job result (or pair.json for pair bundles)
+bundles/<bundle_id>/artifacts/     # embedded artifact copies
+bundles/<bundle_id>/replay.sh      # thin wrapper around the CLI replay entrypoint
+bundles/<bundle_id>/README.md      # human-readable summary and replay instructions
+```
+
+Replay is **CLI only** — it is intentionally not an agent tool and not a dashboard action:
+
+```bash
+npm run replay -- bundles/<bundle_id>
+```
+
+Replay scripts live under `src/replay/` and do not import the pi agent, session, or any LLM module.
+
+| Runner kind | Replay kind | What replay proves |
+| --- | --- | --- |
+| `fake-smoke` | trivial | Re-derives the verdict string deterministically from inputs. |
+| `static-source-evidence` | full | Re-fetches PX4 at the recorded commit and re-runs the source-pattern check. |
+| `mavlink-parser-fuzz` | full | Re-runs the pymavlink harness with the pinned random seed when the local venv exists. |
+| `px4-sitl-probe` | partial | Verifies recorded artifacts; reports that runtime re-boot requires the original environment. |
+| `px4-runtime-replay` | partial (full only when a verified PX4 build manifest matches the recorded commit) | Verifies frame bytes and artifact structure; optional frame re-delivery when the local build matches. |
+| `pair` | full | Recomputes `pair.json` from embedded job results and asserts byte equality. |
+
+**Honesty contract:** partial replay does not prove runtime behavior on its own. The bundle manifest's `replay_kind` and `replay_kind_reason` fields state what was verified. Tampering with `manifest.json` (for example changing the recorded verdict) causes replay to exit non-zero with a clear `FAIL` line.
+
 ## Dashboard
 
 The dashboard is step two: a read-only inspection layer over the run folders the agent creates.
@@ -274,8 +307,12 @@ The dashboard is read-only. It reads run folders and exposes a small local API:
 - `GET /api/jobs/:job_id/artifacts/:artifact_name`
 - `GET /api/pairs`
 - `GET /api/pairs/:pair_id`
+- `GET /api/bundles`
+- `GET /api/bundles/:bundle_id`
 
 Open `http://127.0.0.1:4108/pair.html?pair_id=<pair_id>` for the side-by-side verdict-flip view.
+
+Open `http://127.0.0.1:4108/bundles.html` for the bundle list and `http://127.0.0.1:4108/bundle.html?bundle_id=<bundle_id>` for manifest, artifact paths, and the exact replay command. The dashboard does not run replay.
 
 There are no POST, PUT, PATCH, or DELETE endpoints.
 
@@ -290,11 +327,12 @@ runs/<job_id>/events.jsonl
 runs/<job_id>/result.json
 runs/<job_id>/artifacts/*
 pairs/<pair_id>/pair.json
+bundles/<bundle_id>/*
 agent-runs/<timestamp>/transcript.md
 agent-runs/<timestamp>/summary.json
 ```
 
-`runs/`, `pairs/`, and `agent-runs/` are intentionally ignored by git. The agent tools, runner processes, smoke tests, and dashboard all read the same contract.
+`runs/`, `pairs/`, `bundles/`, and `agent-runs/` are intentionally ignored by git. The agent tools, runner processes, smoke tests, and dashboard all read the same contract.
 
 ## Common Commands
 
@@ -309,7 +347,8 @@ agent-runs/<timestamp>/summary.json
 | `npm run agent -- "<prompt>"` | One-shot natural-language agent run with streaming output and transcript/report artifacts. Requires `openai-codex` auth. |
 | `npm run smoke:agent` | Legacy model-backed smoke test for the six-tool loop. Requires `openai-codex` auth. |
 | `npm run dashboard` | Starts the local read-only viewer. |
-| `npm run smoke:dashboard` | Verifies dashboard health, job detail, pair listing, artifact fetch, traversal rejection, and blocked mutation methods. |
+| `npm run smoke:dashboard` | Verifies dashboard health, job detail, pair listing, bundle pages, artifact fetch, traversal rejection, and blocked mutation methods. |
+| `npm run replay -- bundles/<bundle_id>` | Re-derives the bundle verdict with no LLM; prints `PASS` or `FAIL`. |
 
 ## Repository Map
 
@@ -319,7 +358,9 @@ scripts/                      smoke tests and demo validation scripts
 src/config.ts                 model/runtime constants
   src/session.ts                pi SDK session setup and system prompt
   src/agent/                    agent operator run loop and transcript/report writers
-  src/tools/evidence.ts         seven model-facing domain tools
+  src/tools/evidence.ts         eight model-facing domain tools
+  src/domain/evidence-bundle.ts bundle packaging for reviewer replay
+  src/replay/                   CLI replay per runner kind (no agent imports)
 src/domain/catalog.ts         case and test-card loading
 src/domain/jobs.ts            job lifecycle, run folders, runner dispatch, cancellation
 src/domain/static-source-evidence.ts

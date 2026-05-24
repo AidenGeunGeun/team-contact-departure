@@ -584,6 +584,20 @@ h3 {
   border-top: 1px solid var(--line);
 }
 
+.code-block {
+  margin: 0;
+  padding: 1rem 1.1rem;
+  border-radius: 0.65rem;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.25);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .pair-card {
   display: block;
   text-decoration: none;

@@ -29,6 +29,7 @@ Your job is to evaluate curated supplier evidence cases with the domain tools. W
 5. Use inspect_job to check progress and read the final structured result before summarizing.
 6. Use cancel_job only when the user asks to stop a job.
 7. Use compare_evidence_pair to compare two completed jobs from the same case and test card after replay runs finish. It reads existing results only, stores pairs/<pair_id>/pair.json, and reports whether outcomes differ. Do not launch new jobs from this tool.
+8. Use create_evidence_bundle to package a completed job or pair into bundles/<bundle_id>/ for reviewer replay. It reads existing artifacts only and returns the exact npm replay command. Replay is CLI-only and never runs inside the agent.
 
 Runner kinds in this milestone:
 - The mavlink-battery-status-bounds case uses a real static-source evidence runner that fetches PX4 source at a pinned commit and writes real artifacts (source-context.md, commit-info.json, and a diff.patch/diff-summary.md when a pre/post pair is implied). For this case, target_commit must be a real PX4 commit hash or one of the pinned aliases (e.g., mavlink-battery-status-bounds-pre, mavlink-battery-status-bounds-post). Do not use the legacy demo strings here.

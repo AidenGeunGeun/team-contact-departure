@@ -18,6 +18,11 @@ import {
   type CompareEvidencePairDetails,
   type CompareEvidencePairInput,
 } from "../domain/evidence-pair.js";
+import {
+  createEvidenceBundle,
+  type CreateEvidenceBundleDetails,
+  type CreateEvidenceBundleInput,
+} from "../domain/evidence-bundle.js";
 
 const emptySchema = Type.Object({});
 
@@ -41,6 +46,11 @@ const compareEvidencePairSchema = Type.Object({
   job_id_b: Type.String({ description: "Second completed evidence job id." }),
 });
 
+const createEvidenceBundleSchema = Type.Object({
+  job_id: Type.Optional(Type.String({ description: "Completed evidence job id to package." })),
+  pair_id: Type.Optional(Type.String({ description: "Evidence pair id to package (includes both jobs)." })),
+});
+
 export type ListCasesInput = Static<typeof emptySchema>;
 export type LoadCaseInput = Static<typeof loadCaseSchema>;
 export type ListTestCardsInput = Static<typeof emptySchema>;
@@ -48,6 +58,7 @@ export type LaunchEvidenceJobToolInput = Static<typeof launchEvidenceJobSchema>;
 export type InspectJobToolInput = Static<typeof jobIdSchema>;
 export type CancelJobToolInput = Static<typeof jobIdSchema>;
 export type CompareEvidencePairToolInput = Static<typeof compareEvidencePairSchema>;
+export type CreateEvidenceBundleToolInput = Static<typeof createEvidenceBundleSchema>;
 
 export interface ListCasesDetails {
   cases: CaseSummary[];
@@ -69,6 +80,7 @@ export const DOMAIN_TOOL_NAMES = [
   "inspect_job",
   "cancel_job",
   "compare_evidence_pair",
+  "create_evidence_bundle",
 ] as const;
 
 function textResult<T>(text: string, details: T): AgentToolResult<T> {
@@ -268,6 +280,27 @@ export async function runCompareEvidencePair(
   return textResult(formatEvidencePairComparison(details), details);
 }
 
+function formatEvidenceBundle(details: CreateEvidenceBundleDetails): string {
+  return [
+    `Created evidence bundle ${details.bundle_id}.`,
+    `Bundle path: ${details.bundle_path}`,
+    `Runner kind: ${details.runner_kind}`,
+    `Replay kind: ${details.replay_kind}`,
+    "",
+    "Reviewer replay command (no LLM in the loop):",
+    details.replay_command,
+    "",
+    "Share the bundle directory and replay command with reviewers. Replay re-derives the recorded verdict; partial replay kinds verify artifacts only.",
+  ].join("\n");
+}
+
+export async function runCreateEvidenceBundle(
+  params: CreateEvidenceBundleInput,
+): Promise<AgentToolResult<CreateEvidenceBundleDetails>> {
+  const details = await createEvidenceBundle(params);
+  return textResult(formatEvidenceBundle(details), details);
+}
+
 export const listCasesTool = defineTool<typeof emptySchema, ListCasesDetails>({
   name: "list_cases",
   label: "list cases",
@@ -341,6 +374,19 @@ export const cancelJobTool = defineTool<typeof jobIdSchema, JobCancellationDetai
   },
 });
 
+export const createEvidenceBundleTool = defineTool<typeof createEvidenceBundleSchema, CreateEvidenceBundleDetails>({
+  name: "create_evidence_bundle",
+  label: "create evidence bundle",
+  description:
+    "Package a completed evidence job or pair into a replayable bundle under bundles/<bundle_id>/. Reads existing artifacts only; does not launch jobs or run replay.",
+  promptSnippet: "After a job or pair is terminal, create a bundle and give the reviewer the replay command.",
+  parameters: createEvidenceBundleSchema,
+  executionMode: "parallel",
+  async execute(_toolCallId, params) {
+    return runCreateEvidenceBundle(params as CreateEvidenceBundleInput);
+  },
+});
+
 export const compareEvidencePairTool = defineTool<typeof compareEvidencePairSchema, CompareEvidencePairDetails>({
   name: "compare_evidence_pair",
   label: "compare evidence pair",
@@ -362,4 +408,5 @@ export const evidenceTools = [
   inspectJobTool,
   cancelJobTool,
   compareEvidencePairTool,
+  createEvidenceBundleTool,
 ];

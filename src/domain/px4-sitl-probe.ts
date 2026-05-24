@@ -318,7 +318,7 @@ async function ensureVenv(
   return { pythonPath: pythonBin, created: true };
 }
 
-async function runPreflight(config: Px4SitlProbeConfig): Promise<PreflightReport> {
+export async function runPx4SitlPreflight(config: Px4SitlProbeConfig): Promise<PreflightReport> {
   const root = px4Root(config);
   const binary = px4BinaryPath(config);
   const checks: PreflightCheck[] = [
@@ -403,6 +403,50 @@ async function writePreflightArtifact(artifactDir: string, report: PreflightRepo
     "",
   ];
   await writeFile(join(artifactDir, "preflight-report.md"), lines.join("\n"), "utf8");
+}
+
+export interface PreflightComparison {
+  still_hold: string[];
+  differ: Array<{ name: string; recorded: boolean; current: boolean }>;
+  recorded_px4_binary_present: boolean;
+  current_px4_binary_present: boolean;
+  recorded_all_required_available: boolean;
+  current_all_required_available: boolean;
+}
+
+export function comparePreflightReports(recorded: PreflightReport, current: PreflightReport): PreflightComparison {
+  const recordedByName = new Map(recorded.checks.map((c) => [c.name, c.available]));
+  const currentByName = new Map(current.checks.map((c) => [c.name, c.available]));
+  const names = new Set([...recordedByName.keys(), ...currentByName.keys()]);
+  const still_hold: string[] = [];
+  const differ: PreflightComparison["differ"] = [];
+
+  for (const name of [...names].sort()) {
+    const recordedAvailable = recordedByName.get(name);
+    const currentAvailable = currentByName.get(name);
+    if (recordedAvailable === undefined || currentAvailable === undefined) {
+      differ.push({
+        name,
+        recorded: recordedAvailable ?? false,
+        current: currentAvailable ?? false,
+      });
+      continue;
+    }
+    if (recordedAvailable === currentAvailable) {
+      still_hold.push(`${name}: ${recordedAvailable ? "available" : "unavailable"}`);
+    } else {
+      differ.push({ name, recorded: recordedAvailable, current: currentAvailable });
+    }
+  }
+
+  return {
+    still_hold,
+    differ,
+    recorded_px4_binary_present: recorded.px4_binary_present,
+    current_px4_binary_present: current.px4_binary_present,
+    recorded_all_required_available: recorded.all_required_available,
+    current_all_required_available: current.all_required_available,
+  };
 }
 
 async function writeEvidenceSummary(
@@ -564,7 +608,7 @@ export async function producePx4SitlProbeEvidence(
   await writeFile(join(options.artifact_dir, "runner.log"), "", "utf8");
 
   await progress?.("preflight", 10, "Checking local PX4 runtime prerequisites.");
-  const preflight = await runPreflight(config);
+  const preflight = await runPx4SitlPreflight(config);
   await writePreflightArtifact(options.artifact_dir, preflight);
 
   const preflightGate = preflightBlocksRuntime(preflight);

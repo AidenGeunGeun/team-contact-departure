@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Evidence Bundles — Contact Departure</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Replayable evidence</p>
+          <h1>Evidence Bundles</h1>
+          <p class="subhead">Packaged completed jobs and pairs with reviewer replay commands (CLI only).</p>
+        </div>
+        <div class="topbar__meta">
+          <a class="text-link" href="/">Jobs dashboard</a>
+          <span id="bundle-list-status" class="health health--loading">Loading bundles</span>
+        </div>
+      </header>
+
+      <section class="panel-card">
+        <div class="panel-head">
+          <div>
+            <h2>Bundles</h2>
+            <p id="bundle-count">Loading bundle folders</p>
+          </div>
+        </div>
+        <div id="bundle-list" class="job-list" aria-live="polite"></div>
+      </section>
+    </main>
+    <script type="module" src="/bundles.js"></script>
+  </body>
+</html>

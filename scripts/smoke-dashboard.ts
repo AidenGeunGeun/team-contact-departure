@@ -121,9 +121,11 @@ async function waitForTerminal(jobId: string, baseUrl: string): Promise<JobDetai
 
 async function ensureSmokeRun(baseUrl: string): Promise<JobDetail> {
   const jobs = await fetchJson<{ jobs: JobSnapshot[] }>(`${baseUrl}/api/jobs`);
-  const usable = jobs.jobs.find((job) => job.artifact_count > 0 && TERMINAL_STATES.has(job.state));
-  if (usable) {
-    return fetchJson<JobDetail>(`${baseUrl}/api/jobs/${encodeURIComponent(usable.job_id)}`);
+  for (const candidate of jobs.jobs.filter((job) => job.artifact_count > 0 && TERMINAL_STATES.has(job.state))) {
+    const detail = await fetchJson<JobDetail>(`${baseUrl}/api/jobs/${encodeURIComponent(candidate.job_id)}`);
+    if (detail.recent_events.length > 0) {
+      return detail;
+    }
   }
 
   const launch = await launchEvidenceJob({
@@ -189,6 +191,14 @@ async function main(): Promise<void> {
     assert.equal(pairDetail.pair_id, pairId, "pair detail must return the requested pair id");
     assert.ok(pairDetail.pair, "pair detail must include the pair record");
 
+    const bundles = await fetchJson<{ bundles: { bundle_id: string }[] }>(`${url}/api/bundles`);
+    assert.ok(Array.isArray(bundles.bundles), "bundles list must be an array");
+
+    const bundlesPage = await fetch(`${url}/bundles.html`);
+    assert.equal(bundlesPage.status, 200, "bundles.html must be served");
+    const bundlePage = await fetch(`${url}/bundle.html`);
+    assert.equal(bundlePage.status, 200, "bundle.html must be served");
+
     console.log(
       JSON.stringify(
         {
@@ -206,6 +216,7 @@ async function main(): Promise<void> {
             pair_id: pairDetail.pair_id,
             verdict_flip_demonstrated: pairDetail.pair.verdict_flip_demonstrated,
           },
+          bundles_count: bundles.bundles.length,
         },
         null,
         2,

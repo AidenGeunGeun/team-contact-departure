@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, writeFile as writeFileAsync } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import type { JobInspectionDetails, JobLaunchDetails, RunnerKind } from "../src/domain/jobs.js";
@@ -11,6 +11,7 @@ import {
   DOMAIN_TOOL_NAMES,
   runCancelJob,
   runCompareEvidencePair,
+  runCreateEvidenceBundle,
   runInspectJob,
   runLaunchEvidenceJob,
   runListCases,
@@ -913,6 +914,168 @@ assert.equal(syntheticTruePair.details.pair.frames_delivered_on_both_sides, true
 assert.equal(syntheticTruePair.details.pair.meaningful_outcomes_on_both_sides, true);
 assert.equal(syntheticTruePair.details.pair.outcomes_differ, true);
 
+// ---- Replayable evidence bundles -------------------------------------------
+
+function runReplayCli(bundlePath: string): { status: number; stdout: string; stderr: string } {
+  const result = spawnSync("npm", ["run", "replay", "--", bundlePath], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: smokeChildEnv(),
+  });
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
+
+const fakeSmokeBundle = await runCreateEvidenceBundle({ job_id: fakeFtpComplete.details.job_id });
+assert.ok(fakeSmokeBundle.details.bundle_id.startsWith("bundle-"));
+assert.equal(existsSync(join(repoRoot, fakeSmokeBundle.details.bundle_path, "manifest.json")), true);
+assert.equal(existsSync(join(repoRoot, fakeSmokeBundle.details.bundle_path, "result.json")), true);
+assert.equal(existsSync(join(repoRoot, fakeSmokeBundle.details.bundle_path, "replay.sh")), true);
+assert.equal(existsSync(join(repoRoot, fakeSmokeBundle.details.bundle_path, "README.md")), true);
+
+const fakeReplay = runReplayCli(fakeSmokeBundle.details.bundle_path);
+assert.equal(fakeReplay.status, 0, fakeReplay.stderr || fakeReplay.stdout);
+assert.match(fakeReplay.stdout, /PASS/, "fake-smoke bundle replay must PASS");
+
+let staticBundlePath: string | undefined;
+let staticReplayNote: string | undefined;
+if (networkAvailable && preComplete.details.result?.runner_kind === "static-source-evidence") {
+  try {
+    const staticBundle = await runCreateEvidenceBundle({ job_id: preComplete.details.job_id });
+    staticBundlePath = staticBundle.details.bundle_path;
+    const staticReplay = runReplayCli(staticBundlePath);
+    if (staticReplay.status === 0 && /PASS/.test(staticReplay.stdout)) {
+      staticReplayNote = "static-source bundle replay PASS";
+    } else {
+      staticReplayNote = `static-source bundle replay skipped or failed: ${staticReplay.stderr || staticReplay.stdout}`;
+    }
+  } catch (error) {
+    staticReplayNote = `static-source bundle creation skipped: ${error instanceof Error ? error.message : String(error)}`;
+  }
+} else {
+  staticReplayNote = "static-source bundle replay skipped (network or job unavailable)";
+}
+
+let fuzzBundlePath: string | undefined;
+let fuzzReplayNote: string | undefined;
+if (fuzzComplete.details.result?.runner_kind === "mavlink-parser-fuzz") {
+  try {
+    const fuzzBundle = await runCreateEvidenceBundle({ job_id: fuzzComplete.details.job_id });
+    fuzzBundlePath = fuzzBundle.details.bundle_path;
+    const venvPython = join(repoRoot, ".cache", "pymavlink-venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python3");
+    if (existsSync(venvPython)) {
+      const fuzzReplay = runReplayCli(fuzzBundlePath);
+      if (fuzzReplay.status === 0 && /PASS/.test(fuzzReplay.stdout)) {
+        fuzzReplayNote = "parser-fuzz bundle replay PASS";
+      } else {
+        fuzzReplayNote = `parser-fuzz bundle replay failed: ${fuzzReplay.stderr || fuzzReplay.stdout}`;
+      }
+    } else {
+      fuzzReplayNote = "parser-fuzz bundle replay skipped (pymavlink venv missing)";
+    }
+  } catch (error) {
+    fuzzReplayNote = `parser-fuzz bundle skipped: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+const pairBundle = await runCreateEvidenceBundle({ pair_id: pairComparison.details.pair_id });
+assert.equal(existsSync(join(repoRoot, pairBundle.details.bundle_path, "pair.json")), true);
+const pairReplay = runReplayCli(pairBundle.details.bundle_path);
+assert.equal(pairReplay.status, 0, pairReplay.stderr || pairReplay.stdout);
+assert.match(pairReplay.stdout, /PASS/, "pair bundle replay must PASS");
+
+let pymavlinkMismatchReplayFailed = false;
+if (fuzzBundlePath) {
+  const fuzzManifestPath = join(repoRoot, fuzzBundlePath, "manifest.json");
+  const fuzzManifestOriginal = readFileSync(fuzzManifestPath, "utf8");
+  const fuzzManifest = JSON.parse(fuzzManifestOriginal) as {
+    pinned_inputs: { pymavlink_version?: string };
+  };
+  fuzzManifest.pinned_inputs.pymavlink_version = "0.0.0-not-installed";
+  await writeFileAsync(fuzzManifestPath, `${JSON.stringify(fuzzManifest, null, 2)}\n`, "utf8");
+  const pymavlinkMismatchReplay = runReplayCli(fuzzBundlePath);
+  pymavlinkMismatchReplayFailed = pymavlinkMismatchReplay.status !== 0;
+  assert.equal(pymavlinkMismatchReplayFailed, true, "pymavlink version mismatch replay must FAIL");
+  assert.match(
+    pymavlinkMismatchReplay.stdout + pymavlinkMismatchReplay.stderr,
+    /pymavlink version mismatch|replay refused/i,
+    "pymavlink mismatch must name version refusal",
+  );
+  await writeFileAsync(fuzzManifestPath, fuzzManifestOriginal, "utf8");
+}
+
+let sitlPartialReplayNoVerdictMatch = false;
+let sitlPartialReplayNote: string | undefined;
+if (probeComplete.details.state === "succeeded") {
+  try {
+    const sitlBundle = await runCreateEvidenceBundle({ job_id: probeComplete.details.job_id });
+    const sitlReplay = runReplayCli(sitlBundle.details.bundle_path);
+    const sitlOutput = sitlReplay.stdout + sitlReplay.stderr;
+    sitlPartialReplayNoVerdictMatch = !/Verdict match/i.test(sitlOutput);
+    assert.equal(sitlPartialReplayNoVerdictMatch, true, "SITL partial replay must not claim Verdict match");
+    assert.match(sitlOutput, /Verdict not re-derived/i);
+    assert.match(sitlOutput, /Preflight comparison/i);
+    sitlPartialReplayNote = sitlReplay.status === 0 ? "sitl-probe partial replay PASS" : sitlReplay.stdout;
+  } catch (error) {
+    sitlPartialReplayNote = `sitl-probe bundle skipped: ${error instanceof Error ? error.message : String(error)}`;
+  }
+} else {
+  sitlPartialReplayNote = "sitl-probe partial replay skipped (probe job did not succeed)";
+}
+
+let staticHashMismatchReplayFailed = false;
+if (staticBundlePath) {
+  const staticManifestPath = join(repoRoot, staticBundlePath, "manifest.json");
+  const staticManifestOriginal = readFileSync(staticManifestPath, "utf8");
+  const staticManifest = JSON.parse(staticManifestOriginal) as {
+    pinned_inputs: { px4_commit_hash?: string };
+  };
+  staticManifest.pinned_inputs.px4_commit_hash = "0000000000000000000000000000000000000000";
+  await writeFileAsync(staticManifestPath, `${JSON.stringify(staticManifest, null, 2)}\n`, "utf8");
+  const staticMismatchReplay = runReplayCli(staticBundlePath);
+  staticHashMismatchReplayFailed = staticMismatchReplay.status !== 0;
+  assert.equal(staticHashMismatchReplayFailed, true, "static-source pinned hash mismatch replay must FAIL");
+  assert.match(
+    staticMismatchReplay.stdout + staticMismatchReplay.stderr,
+    /commit hash mismatch|replay refused|could not be verified/i,
+    "static hash mismatch must report pinned hash failure",
+  );
+  await writeFileAsync(staticManifestPath, staticManifestOriginal, "utf8");
+}
+
+let pairFrameTamperReplayFailed = false;
+const pairPreFramePath = join(
+  repoRoot,
+  pairBundle.details.bundle_path,
+  "artifacts/jobs/pre-patch/artifacts/frame-record.json",
+);
+if (existsSync(pairPreFramePath)) {
+  const pairFrameOriginal = readFileSync(pairPreFramePath, "utf8");
+  const pairFrameRecord = JSON.parse(pairFrameOriginal) as { frame_hex?: string };
+  if (pairFrameRecord.frame_hex && pairFrameRecord.frame_hex.length > 2) {
+    const hex = pairFrameRecord.frame_hex;
+    const flipped = hex.endsWith("00") ? `${hex.slice(0, -2)}01` : `${hex.slice(0, -2)}00`;
+    pairFrameRecord.frame_hex = flipped;
+    await writeFileAsync(pairPreFramePath, `${JSON.stringify(pairFrameRecord, null, 2)}\n`, "utf8");
+    const tamperedPairReplay = runReplayCli(pairBundle.details.bundle_path);
+    pairFrameTamperReplayFailed = tamperedPairReplay.status !== 0;
+    assert.equal(pairFrameTamperReplayFailed, true, "tampered pair frame bytes replay must FAIL");
+    assert.match(tamperedPairReplay.stdout + tamperedPairReplay.stderr, /FAIL/);
+    await writeFileAsync(pairPreFramePath, pairFrameOriginal, "utf8");
+  }
+}
+
+const tamperedManifestPath = join(repoRoot, fakeSmokeBundle.details.bundle_path, "manifest.json");
+const tamperedManifest = JSON.parse(readFileSync(tamperedManifestPath, "utf8"));
+tamperedManifest.recorded_result.verdict = "tampered_verdict_for_smoke";
+await writeFileAsync(tamperedManifestPath, `${JSON.stringify(tamperedManifest, null, 2)}\n`, "utf8");
+const tamperedReplay = runReplayCli(fakeSmokeBundle.details.bundle_path);
+assert.notEqual(tamperedReplay.status, 0, "tampered bundle replay must exit non-zero");
+assert.match(tamperedReplay.stdout + tamperedReplay.stderr, /FAIL/, "tampered bundle replay must report FAIL");
+
 // ---- Tool surface ----------------------------------------------------------
 
 const { session } = await createContactDepartureSession();
@@ -1004,6 +1167,20 @@ try {
             frame_delivered: replayResult?.px4_runtime_replay?.frame_delivered,
             artifacts: replayResult?.artifact_paths,
           },
+        },
+        evidenceBundles: {
+          fake_smoke_bundle: fakeSmokeBundle.details.bundle_id,
+          fake_smoke_replay_pass: true,
+          static_replay_note: staticReplayNote,
+          fuzz_replay_note: fuzzReplayNote,
+          pymavlink_mismatch_replay_failed: pymavlinkMismatchReplayFailed,
+          static_hash_mismatch_replay_failed: staticHashMismatchReplayFailed,
+          sitl_partial_replay_no_verdict_match: sitlPartialReplayNoVerdictMatch,
+          sitl_partial_replay_note: sitlPartialReplayNote,
+          pair_bundle: pairBundle.details.bundle_id,
+          pair_replay_pass: true,
+          pair_frame_tamper_replay_failed: pairFrameTamperReplayFailed,
+          tampered_replay_failed: true,
         },
         evidencePair: {
           pair_id: pairComparison.details.pair_id,

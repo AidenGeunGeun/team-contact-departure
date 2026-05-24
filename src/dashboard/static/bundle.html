@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Evidence Bundle — Contact Departure</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Replayable evidence</p>
+          <h1>Evidence Bundle</h1>
+          <p class="subhead">Manifest, artifacts, and the exact CLI replay command (no in-dashboard replay).</p>
+        </div>
+        <div class="topbar__meta">
+          <a class="text-link" href="/bundles.html">All bundles</a>
+          <a class="text-link" href="/">Jobs dashboard</a>
+          <span id="bundle-status" class="health health--loading">Loading bundle</span>
+        </div>
+      </header>
+
+      <section id="bundle-empty" class="empty-card">
+        <h2>No bundle selected</h2>
+        <p>Open this page with <code>?bundle_id=bundle-...</code> or choose a bundle from the list.</p>
+      </section>
+
+      <article id="bundle-detail" class="pair-detail hidden">
+        <div class="pair-header">
+          <div>
+            <p id="bundle-case" class="eyebrow"></p>
+            <h2 id="bundle-title"></h2>
+            <p id="bundle-meta" class="summary-text"></p>
+          </div>
+          <span id="bundle-replay-kind" class="status-pill">replay</span>
+        </div>
+
+        <section class="caveat-panel" aria-label="Replay command">
+          <div class="section-head">
+            <h3>Reviewer replay command</h3>
+            <p>Run from the repository root. Replay does not use the LLM or agent session.</p>
+          </div>
+          <pre id="bundle-replay-command" class="code-block"></pre>
+        </section>
+
+        <section class="metadata-panel" aria-label="Bundle manifest">
+          <div class="section-head">
+            <h3>manifest.json</h3>
+            <p>Canonical machine-readable bundle record.</p>
+          </div>
+          <pre id="bundle-manifest" class="code-block"></pre>
+        </section>
+
+        <section class="metadata-panel" aria-label="Artifact paths">
+          <div class="section-head">
+            <h3>Embedded artifacts</h3>
+          </div>
+          <ul id="bundle-artifacts" class="pair-conditions"></ul>
+        </section>
+      </article>
+    </main>
+    <script type="module" src="/bundle.js"></script>
+  </body>
+</html>

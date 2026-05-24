@@ -52,6 +52,7 @@ logs/
 /runs/
 /agent-runs/
 /pairs/
+/bundles/
 /tmp/
 /cache/
 /.cache/

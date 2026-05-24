@@ -15,7 +15,8 @@
     "agent": "tsx scripts/agent.ts",
     "demo:agent": "tsx scripts/demo-agent.ts",
     "dashboard": "tsx src/dashboard/server.ts",
-    "smoke:dashboard": "tsx scripts/smoke-dashboard.ts"
+    "smoke:dashboard": "tsx scripts/smoke-dashboard.ts",
+    "replay": "tsx scripts/replay.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.75.4",

@@ -353,6 +353,103 @@ async function loadCompletedJob(jobId: string): Promise<{
   };
 }
 
+export function buildEvidencePairRecord(input: {
+  pair_id: string;
+  compared_at: string;
+  case_id: string;
+  test_card_id: string;
+  pre_patch: EvidencePairJobSummary;
+  post_patch: EvidencePairJobSummary;
+}): EvidencePairRecord {
+  const { pre_patch, post_patch } = input;
+  const outcomes_differ = pre_patch.outcome !== post_patch.outcome;
+  const resolved_commit_hashes_differ =
+    Boolean(pre_patch.resolved_commit_hash && post_patch.resolved_commit_hash) &&
+    pre_patch.resolved_commit_hash !== post_patch.resolved_commit_hash;
+  const frame_bytes_equal = true;
+  const budget_profile_equal = true;
+  const provenance_complete =
+    pre_patch.firmware_commit_proven === true && post_patch.firmware_commit_proven === true;
+  const frames_delivered_on_both_sides =
+    pre_patch.frame_delivered === true && post_patch.frame_delivered === true;
+  const meaningful_outcomes_on_both_sides =
+    hasMeaningfulRuntimeOutcome(pre_patch.outcome) && hasMeaningfulRuntimeOutcome(post_patch.outcome);
+  const roles_correctly_assigned = pre_patch.role === "pre-patch" && post_patch.role === "post-patch";
+  const verdict_flip_demonstrated =
+    roles_correctly_assigned &&
+    provenance_complete &&
+    frames_delivered_on_both_sides &&
+    meaningful_outcomes_on_both_sides &&
+    outcomes_differ &&
+    frame_bytes_equal &&
+    budget_profile_equal;
+
+  return {
+    pair_id: input.pair_id,
+    compared_at: input.compared_at,
+    case_id: input.case_id,
+    test_card_id: input.test_card_id,
+    pre_patch,
+    post_patch,
+    outcomes_differ,
+    resolved_commit_hashes_differ,
+    frame_bytes_equal,
+    provenance_complete,
+    budget_profile_equal,
+    frames_delivered_on_both_sides,
+    meaningful_outcomes_on_both_sides,
+    verdict_flip_demonstrated,
+  };
+}
+
+interface EmbeddedJobRecord {
+  job_id: string;
+  request: JobRecordFile["request"];
+}
+
+export async function recomputeEvidencePairFromJobs(input: {
+  pairId: string;
+  comparedAt: string;
+  preJob: EmbeddedJobRecord;
+  preResult: EvidenceResult;
+  postJob: EmbeddedJobRecord;
+  postResult: EvidenceResult;
+}): Promise<EvidencePairRecord> {
+  const preSummary = extractJobSummary(input.preJob.job_id, input.preJob, input.preResult);
+  const postSummary = extractJobSummary(input.postJob.job_id, input.postJob, input.postResult);
+  const caseId = input.preJob.request.case_id;
+
+  const staticSourceCaseId = await resolveStaticSourceCaseId(caseId);
+  if (!staticSourceCaseId) {
+    throw new EvidencePairError(`Case ${caseId} has no static-source role mapping for pair replay.`);
+  }
+
+  const staticConfig = await loadStaticSourceConfig();
+  preSummary.role = resolveRoleFromHash(
+    staticConfig,
+    staticSourceCaseId,
+    preSummary.job_id,
+    preSummary.resolved_commit_hash,
+  );
+  postSummary.role = resolveRoleFromHash(
+    staticConfig,
+    staticSourceCaseId,
+    postSummary.job_id,
+    postSummary.resolved_commit_hash,
+  );
+
+  const { pre_patch, post_patch } = assignPrePostRoles(preSummary, postSummary);
+
+  return buildEvidencePairRecord({
+    pair_id: input.pairId,
+    compared_at: input.comparedAt,
+    case_id: caseId,
+    test_card_id: input.preJob.request.test_card_id,
+    pre_patch,
+    post_patch,
+  });
+}
+
 export async function compareEvidencePair(params: CompareEvidencePairInput): Promise<CompareEvidencePairDetails> {
   if (params.job_id_a === params.job_id_b) {
     throw new EvidencePairError("compare_evidence_pair requires two different job IDs.");
@@ -410,46 +507,17 @@ export async function compareEvidencePair(params: CompareEvidencePairInput): Pro
   }
 
   const { pre_patch, post_patch } = assignPrePostRoles(jobA.summary, jobB.summary);
-  const outcomes_differ = pre_patch.outcome !== post_patch.outcome;
-  const resolved_commit_hashes_differ =
-    Boolean(pre_patch.resolved_commit_hash && post_patch.resolved_commit_hash) &&
-    pre_patch.resolved_commit_hash !== post_patch.resolved_commit_hash;
-  const frame_bytes_equal = true;
-  const budget_profile_equal = true;
-  const provenance_complete =
-    pre_patch.firmware_commit_proven === true && post_patch.firmware_commit_proven === true;
-  const frames_delivered_on_both_sides =
-    pre_patch.frame_delivered === true && post_patch.frame_delivered === true;
-  const meaningful_outcomes_on_both_sides =
-    hasMeaningfulRuntimeOutcome(pre_patch.outcome) && hasMeaningfulRuntimeOutcome(post_patch.outcome);
-  const roles_correctly_assigned = pre_patch.role === "pre-patch" && post_patch.role === "post-patch";
-  const verdict_flip_demonstrated =
-    roles_correctly_assigned &&
-    provenance_complete &&
-    frames_delivered_on_both_sides &&
-    meaningful_outcomes_on_both_sides &&
-    outcomes_differ &&
-    frame_bytes_equal &&
-    budget_profile_equal;
 
   const pairId = createPairId();
   const paths = pairPaths(pairId);
-  const pair: EvidencePairRecord = {
+  const pair = buildEvidencePairRecord({
     pair_id: pairId,
     compared_at: new Date().toISOString(),
     case_id: caseA,
     test_card_id: cardA,
     pre_patch,
     post_patch,
-    outcomes_differ,
-    resolved_commit_hashes_differ,
-    frame_bytes_equal,
-    provenance_complete,
-    budget_profile_equal,
-    frames_delivered_on_both_sides,
-    meaningful_outcomes_on_both_sides,
-    verdict_flip_demonstrated,
-  };
+  });
 
   await writeJson(paths.pairPath, pair);
 

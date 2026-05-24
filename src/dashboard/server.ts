@@ -5,6 +5,8 @@ import { extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type EvidenceResult, type JobEvent, type JobState, type JobStatus } from "../domain/jobs.js";
 import { type EvidencePairRecord } from "../domain/evidence-pair.js";
+import { BUNDLES_ROOT } from "../domain/evidence-bundle.js";
+import type { BundleManifest } from "../replay/types.js";
 
 interface DashboardJobRecord {
   job_id?: unknown;
@@ -92,9 +94,28 @@ interface PairDetail extends PairSnapshot {
   post_patch_job?: JobSnapshot;
 }
 
+interface BundleSnapshot {
+  bundle_id: string;
+  created_at: string;
+  runner_kind: string;
+  replay_kind: string;
+  case_id: string;
+  test_card_id: string;
+  job_id?: string;
+  pair_id?: string;
+  recorded_verdict: string;
+}
+
+interface BundleDetail extends BundleSnapshot {
+  manifest: BundleManifest;
+  artifact_paths: string[];
+  replay_command: string;
+}
+
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const RUNS_ROOT = join(REPO_ROOT, "runs");
 const PAIRS_ROOT = join(REPO_ROOT, "pairs");
+const BUNDLES_DIR = BUNDLES_ROOT;
 const STATIC_ROOT = fileURLToPath(new URL("./static/", import.meta.url));
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4108;
@@ -122,6 +143,10 @@ function isSafeJobId(jobId: string): boolean {
 
 function isSafePairId(pairId: string): boolean {
   return /^pair-[A-Za-z0-9_-]+$/.test(pairId);
+}
+
+function isSafeBundleId(bundleId: string): boolean {
+  return /^bundle-[A-Za-z0-9_-]+$/.test(bundleId);
 }
 
 function isTerminal(state: string | undefined): boolean {
@@ -395,6 +420,69 @@ async function readPairDetail(pairId: string): Promise<PairDetail | undefined> {
   };
 }
 
+async function readBundleDetail(bundleId: string): Promise<BundleDetail | undefined> {
+  if (!isSafeBundleId(bundleId)) {
+    return undefined;
+  }
+  const bundleDir = join(BUNDLES_DIR, bundleId);
+  if (!(await pathExists(bundleDir))) {
+    return undefined;
+  }
+  const manifestRead = await readJsonFile<BundleManifest>(join(bundleDir, "manifest.json"));
+  if (!manifestRead.value) {
+    return undefined;
+  }
+  const manifest = manifestRead.value;
+  return {
+    bundle_id: manifest.bundle_id,
+    created_at: manifest.created_at,
+    runner_kind: manifest.runner_kind,
+    replay_kind: manifest.replay_kind,
+    case_id: manifest.case_id,
+    test_card_id: manifest.test_card_id,
+    job_id: manifest.job_id,
+    pair_id: manifest.pair_id,
+    recorded_verdict: manifest.recorded_result.verdict,
+    manifest,
+    artifact_paths: manifest.artifact_paths,
+    replay_command: manifest.replay_command,
+  };
+}
+
+async function listBundles(): Promise<BundleSnapshot[]> {
+  let entries;
+  try {
+    entries = await readdir(BUNDLES_DIR, { withFileTypes: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+
+  const bundles = await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory() && isSafeBundleId(entry.name))
+      .map(async (entry) => readBundleDetail(entry.name)),
+  );
+
+  return bundles
+    .filter((bundle): bundle is BundleDetail => Boolean(bundle))
+    .map((bundle) => ({
+      bundle_id: bundle.bundle_id,
+      created_at: bundle.created_at,
+      runner_kind: bundle.runner_kind,
+      replay_kind: bundle.replay_kind,
+      case_id: bundle.case_id,
+      test_card_id: bundle.test_card_id,
+      job_id: bundle.job_id,
+      pair_id: bundle.pair_id,
+      recorded_verdict: bundle.recorded_verdict,
+    }))
+    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
 async function listPairs(): Promise<PairSnapshot[]> {
   let entries;
   try {
@@ -496,6 +584,26 @@ async function handleApi(url: URL, response: ServerResponse): Promise<void> {
 
   if (url.pathname === "/api/pairs") {
     sendJson(response, 200, { pairs: await listPairs() });
+    return;
+  }
+
+  if (url.pathname === "/api/bundles") {
+    sendJson(response, 200, { bundles: await listBundles() });
+    return;
+  }
+
+  if (segments[0] === "api" && segments[1] === "bundles" && segments[2]) {
+    const bundleId = segments[2];
+    if (!isSafeBundleId(bundleId)) {
+      sendJson(response, 400, { error: "invalid_bundle_id" });
+      return;
+    }
+    const detail = await readBundleDetail(bundleId);
+    if (!detail) {
+      sendNotFound(response);
+      return;
+    }
+    sendJson(response, 200, detail);
     return;
   }
 
