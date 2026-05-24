@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startDashboardServer } from "../src/dashboard/server.js";
 import { launchEvidenceJob } from "../src/domain/jobs.js";
@@ -26,10 +27,74 @@ interface JobDetail extends JobSnapshot {
   artifacts: ArtifactMetadata[];
 }
 
+interface PairListItem {
+  pair_id: string;
+}
+
+interface PairDetailResponse {
+  pair_id: string;
+  pair: {
+    verdict_flip_demonstrated?: boolean;
+    frame_bytes_equal?: boolean;
+    provenance_complete?: boolean;
+    outcomes_differ?: boolean;
+  };
+}
+
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const RUNS_ROOT = new URL("../runs/", import.meta.url);
+const PAIRS_ROOT = join(REPO_ROOT, "pairs");
 const TERMINAL_STATES = new Set(["succeeded", "failed", "cancelled"]);
 const SMOKE_TIMEOUT_MS = 15_000;
+const SMOKE_PAIR_ID = "pair-smoke-dashboard-fixture";
+
+async function writeSmokePairFixture(jobId: string): Promise<string> {
+  const pairDir = join(PAIRS_ROOT, SMOKE_PAIR_ID);
+  await mkdir(pairDir, { recursive: true });
+  await writeFile(
+    join(pairDir, "pair.json"),
+    `${JSON.stringify(
+      {
+        pair_id: SMOKE_PAIR_ID,
+        compared_at: new Date().toISOString(),
+        case_id: "mavlink-battery-status-runtime-replay",
+        test_card_id: "px4-runtime-replay",
+        pre_patch: {
+          job_id: jobId,
+          runner_kind: "fake-smoke",
+          target_commit: "smoke-pre",
+          role: "pre-patch",
+        },
+        post_patch: {
+          job_id: jobId,
+          runner_kind: "fake-smoke",
+          target_commit: "smoke-post",
+          role: "post-patch",
+        },
+        outcomes_differ: false,
+        resolved_commit_hashes_differ: false,
+        frame_bytes_equal: true,
+        provenance_complete: false,
+        budget_profile_equal: true,
+        frames_delivered_on_both_sides: false,
+        meaningful_outcomes_on_both_sides: false,
+        verdict_flip_demonstrated: false,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  return SMOKE_PAIR_ID;
+}
+
+async function resolveSmokePairId(baseUrl: string, jobId: string): Promise<string> {
+  const pairs = await fetchJson<{ pairs: PairListItem[] }>(`${baseUrl}/api/pairs`);
+  if (pairs.pairs.length > 0) {
+    return pairs.pairs[0].pair_id;
+  }
+  return writeSmokePairFixture(jobId);
+}
 
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { headers: { accept: "application/json" } });
@@ -116,6 +181,14 @@ async function main(): Promise<void> {
     );
     assert.equal(traversal.status, 400, "path traversal must be rejected");
 
+    const pairs = await fetchJson<{ pairs: unknown[] }>(`${url}/api/pairs`);
+    assert.ok(Array.isArray(pairs.pairs), "pairs list must be an array");
+
+    const pairId = await resolveSmokePairId(url, detail.job_id);
+    const pairDetail = await fetchJson<PairDetailResponse>(`${url}/api/pairs/${encodeURIComponent(pairId)}`);
+    assert.equal(pairDetail.pair_id, pairId, "pair detail must return the requested pair id");
+    assert.ok(pairDetail.pair, "pair detail must include the pair record");
+
     console.log(
       JSON.stringify(
         {
@@ -128,6 +201,10 @@ async function main(): Promise<void> {
             runner_kind: detail.runner_kind,
             artifact_count: detail.artifact_count,
             verified_artifact: artifact.name,
+          },
+          smoke_pair: {
+            pair_id: pairDetail.pair_id,
+            verdict_flip_demonstrated: pairDetail.pair.verdict_flip_demonstrated,
           },
         },
         null,

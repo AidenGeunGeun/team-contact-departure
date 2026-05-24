@@ -1626,7 +1626,7 @@ async function buildPx4RuntimeReplayResult(
     {
       name: "px4_resolved_commit_hash",
       value: evidence.resolved_commit_hash,
-      interpretation: "Post-patch commit hash requested for this replay job.",
+      interpretation: "Resolved commit hash recorded for this replay job.",
     },
     {
       name: "crafted_frame_delivered",

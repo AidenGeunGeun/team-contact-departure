@@ -1,5 +1,6 @@
 const state = {
   jobs: [],
+  pairs: [],
   selectedJobId: null,
   selectedArtifact: null,
   detail: null,
@@ -31,6 +32,8 @@ const elements = {
   artifactCount: document.querySelector("#artifact-count"),
   artifactList: document.querySelector("#artifact-list"),
   artifactPreview: document.querySelector("#artifact-preview"),
+  pairCount: document.querySelector("#pair-count"),
+  pairList: document.querySelector("#pair-list"),
 };
 
 elements.refreshNow.addEventListener("click", () => refreshAll({ keepArtifact: true }));
@@ -180,6 +183,43 @@ function renderJobs() {
       </div>
     `;
     elements.jobList.append(button);
+  }
+}
+
+function renderPairs() {
+  const pairs = state.pairs;
+  elements.pairCount.textContent =
+    pairs.length === 0 ? "No pair folders found" : `${pairs.length} pair folder${pairs.length === 1 ? "" : "s"}`;
+  elements.pairList.replaceChildren();
+
+  if (pairs.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-card compact-empty";
+    empty.innerHTML = "<p>Use <code>compare_evidence_pair</code> after two replay jobs finish.</p>";
+    elements.pairList.append(empty);
+    return;
+  }
+
+  for (const pair of pairs) {
+    const demonstrated = pair.verdict_flip_demonstrated === true;
+    const link = document.createElement("a");
+    link.className = "job-card pair-card";
+    link.href = `/pair.html?pair_id=${encodeURIComponent(pair.pair_id)}`;
+    link.innerHTML = `
+      <div class="job-card__top">
+        <span class="${demonstrated ? "status-pill status-pill--good" : "status-pill status-pill--warn"}">
+          ${demonstrated ? "Verdict flip demonstrated" : "Verdict flip not demonstrated"}
+        </span>
+      </div>
+      <div>
+        <h3>${escapeHtml(pair.case_id)}</h3>
+        <p>${escapeHtml(pair.test_card_id)}</p>
+      </div>
+      <div class="job-card__meta">
+        <span>${escapeHtml(formatTime(pair.compared_at))}</span>
+      </div>
+    `;
+    elements.pairList.append(link);
   }
 }
 
@@ -433,14 +473,20 @@ function renderPreview(artifact, content) {
 
 async function refreshAll({ keepArtifact }) {
   try {
-    const [health, jobsPayload] = await Promise.all([
+    const [health, jobsPayload, pairsPayload] = await Promise.all([
       fetchJson("/api/health"),
       fetchJson("/api/jobs"),
+      fetchJson("/api/pairs"),
     ]);
     setHealth(health.runs_available, health.runs_available ? "Runs directory available" : "Runs directory missing");
     state.jobs = jobsPayload.jobs;
+    state.pairs = pairsPayload.pairs;
 
-    if (!state.selectedJobId && state.jobs.length > 0) {
+    const params = new URLSearchParams(window.location.search);
+    const requestedJobId = params.get("job_id");
+    if (requestedJobId && state.jobs.some((job) => job.job_id === requestedJobId)) {
+      state.selectedJobId = requestedJobId;
+    } else if (!state.selectedJobId && state.jobs.length > 0) {
       state.selectedJobId = state.jobs[0].job_id;
     }
     if (state.selectedJobId && !state.jobs.some((job) => job.job_id === state.selectedJobId)) {
@@ -449,6 +495,7 @@ async function refreshAll({ keepArtifact }) {
     }
 
     renderJobs();
+    renderPairs();
     try {
       await loadDetail({ keepArtifact });
       elements.refreshTime.textContent = `Last refreshed ${formatTime(new Date().toISOString())}`;

@@ -13,6 +13,11 @@ import {
   type JobLaunchDetails,
   type LaunchEvidenceJobInput,
 } from "../domain/jobs.js";
+import {
+  compareEvidencePair,
+  type CompareEvidencePairDetails,
+  type CompareEvidencePairInput,
+} from "../domain/evidence-pair.js";
 
 const emptySchema = Type.Object({});
 
@@ -31,12 +36,18 @@ const jobIdSchema = Type.Object({
   job_id: Type.String({ description: "Evidence job id returned by launch_evidence_job." }),
 });
 
+const compareEvidencePairSchema = Type.Object({
+  job_id_a: Type.String({ description: "First completed evidence job id." }),
+  job_id_b: Type.String({ description: "Second completed evidence job id." }),
+});
+
 export type ListCasesInput = Static<typeof emptySchema>;
 export type LoadCaseInput = Static<typeof loadCaseSchema>;
 export type ListTestCardsInput = Static<typeof emptySchema>;
 export type LaunchEvidenceJobToolInput = Static<typeof launchEvidenceJobSchema>;
 export type InspectJobToolInput = Static<typeof jobIdSchema>;
 export type CancelJobToolInput = Static<typeof jobIdSchema>;
+export type CompareEvidencePairToolInput = Static<typeof compareEvidencePairSchema>;
 
 export interface ListCasesDetails {
   cases: CaseSummary[];
@@ -57,6 +68,7 @@ export const DOMAIN_TOOL_NAMES = [
   "launch_evidence_job",
   "inspect_job",
   "cancel_job",
+  "compare_evidence_pair",
 ] as const;
 
 function textResult<T>(text: string, details: T): AgentToolResult<T> {
@@ -176,6 +188,47 @@ function formatCancellation(details: JobCancellationDetails): string {
   return `Job ${details.job_id} is now ${details.state}. ${details.message}`;
 }
 
+function formatEvidencePairComparison(details: CompareEvidencePairDetails): string {
+  const { pair } = details;
+  const demonstrated = pair.verdict_flip_demonstrated === true;
+  const lines = [
+    `Stored evidence pair ${details.pair_id}.`,
+    `Pair artifact: ${details.pair_path}`,
+    `Case: ${pair.case_id} (${pair.test_card_id})`,
+    "",
+    demonstrated
+      ? "Verdict flip demonstrated: yes — both sides ran the same recipe with proven firmware, delivered frames, and meaningful differing runtime outcomes."
+      : "Verdict flip demonstrated: no — the pair artifact was stored, but the full flip claim is not supported by the recorded conditions.",
+    "",
+    "Supporting conditions:",
+    `- outcomes differ: ${pair.outcomes_differ ? "yes" : "no"}`,
+    `- provenance complete: ${pair.provenance_complete ? "yes" : "no"}`,
+    `- frame bytes equal: ${pair.frame_bytes_equal ? "yes" : "no"}`,
+    `- budget profile equal: ${pair.budget_profile_equal ? "yes" : "no"}`,
+    `- frames delivered on both sides: ${pair.frames_delivered_on_both_sides ? "yes" : "no"}`,
+    `- meaningful outcomes on both sides: ${pair.meaningful_outcomes_on_both_sides ? "yes" : "no"}`,
+    "",
+    "Pre-patch job:",
+    `- job_id: ${pair.pre_patch.job_id}`,
+    `- budget_profile: ${pair.pre_patch.budget_profile ?? "unknown"}`,
+    `- resolved commit: ${pair.pre_patch.resolved_commit_hash ?? "unknown"}`,
+    `- outcome: ${pair.pre_patch.outcome ?? "unknown"}`,
+    `- frame delivered: ${pair.pre_patch.frame_delivered ?? "unknown"}`,
+    `- firmware_commit_proven: ${pair.pre_patch.firmware_commit_proven ?? "unknown"}`,
+    "",
+    "Post-patch job:",
+    `- job_id: ${pair.post_patch.job_id}`,
+    `- budget_profile: ${pair.post_patch.budget_profile ?? "unknown"}`,
+    `- resolved commit: ${pair.post_patch.resolved_commit_hash ?? "unknown"}`,
+    `- outcome: ${pair.post_patch.outcome ?? "unknown"}`,
+    `- frame delivered: ${pair.post_patch.frame_delivered ?? "unknown"}`,
+    `- firmware_commit_proven: ${pair.post_patch.firmware_commit_proven ?? "unknown"}`,
+    "",
+    `Resolved commit hashes differ: ${pair.resolved_commit_hashes_differ ? "yes" : "no"}`,
+  ];
+  return lines.join("\n");
+}
+
 export async function runListCases(): Promise<AgentToolResult<ListCasesDetails>> {
   const cases = await listCases();
   return textResult(formatCases(cases), { cases });
@@ -206,6 +259,13 @@ export async function runInspectJob(params: InspectJobInput): Promise<AgentToolR
 export async function runCancelJob(params: CancelJobInput): Promise<AgentToolResult<JobCancellationDetails>> {
   const details = await cancelJob(params);
   return textResult(formatCancellation(details), details);
+}
+
+export async function runCompareEvidencePair(
+  params: CompareEvidencePairInput,
+): Promise<AgentToolResult<CompareEvidencePairDetails>> {
+  const details = await compareEvidencePair(params);
+  return textResult(formatEvidencePairComparison(details), details);
 }
 
 export const listCasesTool = defineTool<typeof emptySchema, ListCasesDetails>({
@@ -281,6 +341,19 @@ export const cancelJobTool = defineTool<typeof jobIdSchema, JobCancellationDetai
   },
 });
 
+export const compareEvidencePairTool = defineTool<typeof compareEvidencePairSchema, CompareEvidencePairDetails>({
+  name: "compare_evidence_pair",
+  label: "compare evidence pair",
+  description:
+    "Compare two completed evidence jobs from the same case, test card, and budget profile. Reads existing results only, validates roles and frame bytes, and stores a pair.json artifact. Headline field is verdict_flip_demonstrated, with supporting condition booleans recorded for honest review.",
+  promptSnippet: "After two replay jobs finish, compare them to capture a verdict-flip pair artifact.",
+  parameters: compareEvidencePairSchema,
+  executionMode: "parallel",
+  async execute(_toolCallId, params) {
+    return runCompareEvidencePair(params as CompareEvidencePairInput);
+  },
+});
+
 export const evidenceTools = [
   listCasesTool,
   loadCaseTool,
@@ -288,4 +361,5 @@ export const evidenceTools = [
   launchEvidenceJobTool,
   inspectJobTool,
   cancelJobTool,
+  compareEvidencePairTool,
 ];

@@ -4,6 +4,7 @@ import { access, readdir, readFile, stat } from "node:fs/promises";
 import { extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type EvidenceResult, type JobEvent, type JobState, type JobStatus } from "../domain/jobs.js";
+import { type EvidencePairRecord } from "../domain/evidence-pair.js";
 
 interface DashboardJobRecord {
   job_id?: unknown;
@@ -73,8 +74,27 @@ interface JobDetail extends JobSnapshot {
   artifacts: ArtifactMetadata[];
 }
 
+interface PairSnapshot {
+  pair_id: string;
+  case_id: string;
+  test_card_id: string;
+  compared_at: string;
+  outcomes_differ: boolean;
+  resolved_commit_hashes_differ: boolean;
+  verdict_flip_demonstrated: boolean;
+  pre_patch_job_id: string;
+  post_patch_job_id: string;
+}
+
+interface PairDetail extends PairSnapshot {
+  pair: EvidencePairRecord;
+  pre_patch_job?: JobSnapshot;
+  post_patch_job?: JobSnapshot;
+}
+
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const RUNS_ROOT = join(REPO_ROOT, "runs");
+const PAIRS_ROOT = join(REPO_ROOT, "pairs");
 const STATIC_ROOT = fileURLToPath(new URL("./static/", import.meta.url));
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4108;
@@ -98,6 +118,10 @@ function toPosixPath(pathName: string): string {
 
 function isSafeJobId(jobId: string): boolean {
   return /^job-[A-Za-z0-9_-]+$/.test(jobId);
+}
+
+function isSafePairId(pairId: string): boolean {
+  return /^pair-[A-Za-z0-9_-]+$/.test(pairId);
 }
 
 function isTerminal(state: string | undefined): boolean {
@@ -255,8 +279,12 @@ function buildSnapshot(
     progress: Math.max(0, Math.min(100, asNumber(status?.progress, 0))),
     runner_kind: status?.runner?.type ?? result?.runner_kind ?? asString(record?.runner?.type),
     verdict: result?.verdict,
-    verdict_kind: result?.static_source?.verdict_kind,
-    resolved_commit_hash: result?.static_source?.resolved_commit_hash,
+    verdict_kind:
+      result?.static_source?.verdict_kind ??
+      result?.px4_runtime_replay?.outcome ??
+      result?.px4_sitl_probe?.outcome,
+    resolved_commit_hash:
+      result?.static_source?.resolved_commit_hash ?? result?.px4_runtime_replay?.resolved_commit_hash,
     created_at: status?.created_at ?? asString(record?.launched_at),
     updated_at: status?.updated_at ?? result?.completed_at ?? asString(record?.launched_at),
     artifact_count: artifacts.length,
@@ -331,6 +359,76 @@ async function listJobs(): Promise<JobSnapshot[]> {
     .sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
 }
 
+async function readPairDetail(pairId: string): Promise<PairDetail | undefined> {
+  if (!isSafePairId(pairId)) {
+    return undefined;
+  }
+  const pairDir = join(PAIRS_ROOT, pairId);
+  if (!(await pathExists(pairDir))) {
+    return undefined;
+  }
+
+  const pairRead = await readJsonFile<EvidencePairRecord>(join(pairDir, "pair.json"));
+  if (!pairRead.value) {
+    return undefined;
+  }
+
+  const pair = pairRead.value;
+  const [prePatchJob, postPatchJob] = await Promise.all([
+    readJobDetail(pair.pre_patch.job_id),
+    readJobDetail(pair.post_patch.job_id),
+  ]);
+
+  return {
+    pair_id: pair.pair_id,
+    case_id: pair.case_id,
+    test_card_id: pair.test_card_id,
+    compared_at: pair.compared_at,
+    outcomes_differ: pair.outcomes_differ,
+    resolved_commit_hashes_differ: pair.resolved_commit_hashes_differ,
+    verdict_flip_demonstrated: pair.verdict_flip_demonstrated,
+    pre_patch_job_id: pair.pre_patch.job_id,
+    post_patch_job_id: pair.post_patch.job_id,
+    pair,
+    pre_patch_job: prePatchJob,
+    post_patch_job: postPatchJob,
+  };
+}
+
+async function listPairs(): Promise<PairSnapshot[]> {
+  let entries;
+  try {
+    entries = await readdir(PAIRS_ROOT, { withFileTypes: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+
+  const pairs = await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory() && isSafePairId(entry.name))
+      .map(async (entry) => readPairDetail(entry.name)),
+  );
+
+  return pairs
+    .filter((pair): pair is PairDetail => Boolean(pair))
+    .map((pair) => ({
+      pair_id: pair.pair_id,
+      case_id: pair.case_id,
+      test_card_id: pair.test_card_id,
+      compared_at: pair.compared_at,
+      outcomes_differ: pair.outcomes_differ,
+      resolved_commit_hashes_differ: pair.resolved_commit_hashes_differ,
+      verdict_flip_demonstrated: pair.pair.verdict_flip_demonstrated,
+      pre_patch_job_id: pair.pre_patch_job_id,
+      post_patch_job_id: pair.post_patch_job_id,
+    }))
+    .sort((a, b) => b.compared_at.localeCompare(a.compared_at));
+}
+
 function sendJson(response: ServerResponse, statusCode: number, value: unknown): void {
   response.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
@@ -393,6 +491,26 @@ async function handleApi(url: URL, response: ServerResponse): Promise<void> {
 
   if (url.pathname === "/api/jobs") {
     sendJson(response, 200, { jobs: await listJobs() });
+    return;
+  }
+
+  if (url.pathname === "/api/pairs") {
+    sendJson(response, 200, { pairs: await listPairs() });
+    return;
+  }
+
+  if (segments[0] === "api" && segments[1] === "pairs" && segments[2]) {
+    const pairId = segments[2];
+    if (!isSafePairId(pairId)) {
+      sendJson(response, 400, { error: "invalid_pair_id" });
+      return;
+    }
+    const detail = await readPairDetail(pairId);
+    if (!detail) {
+      sendNotFound(response);
+      return;
+    }
+    sendJson(response, 200, detail);
     return;
   }
 

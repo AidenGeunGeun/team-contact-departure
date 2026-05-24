@@ -1,14 +1,16 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import type { JobInspectionDetails, JobLaunchDetails, RunnerKind } from "../src/domain/jobs.js";
-import { resolvePostPatchCommitHash } from "../src/domain/px4-runtime-replay.js";
+import { resolvePostPatchCommitHash, resolvePrePatchCommitHash } from "../src/domain/px4-runtime-replay.js";
 import { createContactDepartureSession } from "../src/session.js";
 import {
   DOMAIN_TOOL_NAMES,
   runCancelJob,
+  runCompareEvidencePair,
   runInspectJob,
   runLaunchEvidenceJob,
   runListCases,
@@ -35,6 +37,104 @@ const ALLOWED_STATIC_VERDICTS = new Set([
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+interface SyntheticReplayJobInput {
+  job_id: string;
+  case_id: string;
+  test_card_id: string;
+  target_commit: string;
+  budget_profile: string;
+  resolved_commit_hash: string;
+  outcome: "runtime_clean" | "runtime_anomalous" | "runtime_unavailable";
+  frame_delivered: boolean;
+  firmware_commit_proven: boolean;
+  frame_hex: string;
+}
+
+async function writeSyntheticReplayJob(input: SyntheticReplayJobInput): Promise<void> {
+  const runDir = join(repoRoot, "runs", input.job_id);
+  const artifactDir = join(runDir, "artifacts");
+  await mkdir(artifactDir, { recursive: true });
+  const now = new Date().toISOString();
+  const frameRecordPath = join(artifactDir, "frame-record.json");
+  const frameRecordRel = `runs/${input.job_id}/artifacts/frame-record.json`;
+
+  await writeFile(
+    join(runDir, "job.json"),
+    `${JSON.stringify(
+      {
+        job_id: input.job_id,
+        launched_at: now,
+        request: {
+          case_id: input.case_id,
+          test_card_id: input.test_card_id,
+          target_commit: input.target_commit,
+          budget_profile: input.budget_profile,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  await writeFile(
+    join(runDir, "status.json"),
+    `${JSON.stringify(
+      {
+        job_id: input.job_id,
+        state: "succeeded",
+        phase: "completed",
+        progress: 100,
+        created_at: now,
+        updated_at: now,
+        finished_at: now,
+        run_dir: `runs/${input.job_id}`,
+        artifact_dir: `runs/${input.job_id}/artifacts`,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  await writeFile(
+    frameRecordPath,
+    `${JSON.stringify({ seed_id: "bounds-test-battery-status", frame_hex: input.frame_hex }, null, 2)}\n`,
+    "utf8",
+  );
+  await writeFile(
+    join(runDir, "result.json"),
+    `${JSON.stringify(
+      {
+        job_id: input.job_id,
+        verdict: input.outcome === "runtime_anomalous" ? "attention_required" : "manual_review_needed",
+        confidence: "medium",
+        summary: "Synthetic replay job for offline smoke fixture.",
+        evidence_signals: [],
+        artifact_paths: [frameRecordRel],
+        cautions: [],
+        completed_at: now,
+        runner_kind: "px4-runtime-replay",
+        px4_runtime_replay: {
+          case_id: input.case_id,
+          test_card_id: input.test_card_id,
+          target_commit: input.target_commit,
+          resolved_commit_hash: input.resolved_commit_hash,
+          outcome: input.outcome,
+          frame_delivered: input.frame_delivered,
+          firmware_commit_proven: input.firmware_commit_proven,
+          pymavlink_version: "2.4.41",
+          python_version: "3.11.0",
+          mavlink_connection: "udp:127.0.0.1:14540",
+          px4_binary_present: true,
+          budget_profile: input.budget_profile,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
 }
 
 async function waitForState(jobId: string, predicate: (state: string) => boolean, timeoutMs: number) {
@@ -469,6 +569,7 @@ if (probeComplete.details.state === "succeeded") {
 // ---- PX4 runtime replay runner: end-to-end ---------------------------------
 
 const postPatchCommitHash = await resolvePostPatchCommitHash();
+const prePatchCommitHash = await resolvePrePatchCommitHash();
 const replayBuildManifestPath = join(repoRoot, ".cache", "px4", ".contact-departure-sitl-build.json");
 let replayManifestProvesPostPatch = false;
 if (existsSync(replayBuildManifestPath)) {
@@ -479,20 +580,30 @@ if (existsSync(replayBuildManifestPath)) {
     manifest.commit_hash === postPatchCommitHash && existsSync(preparedPx4Binary);
 }
 
-let prePatchReplayRejected = false;
+let invalidReplayTargetRejected = false;
 try {
   await runLaunchEvidenceJob({
     case_id: "mavlink-battery-status-runtime-replay",
     test_card_id: "px4-runtime-replay",
-    target_commit: "mavlink-battery-status-bounds-pre",
+    target_commit: "not-a-valid-replay-target",
     budget_profile: "smoke-fast",
   });
-} catch (error) {
-  prePatchReplayRejected = true;
-  const message = error instanceof Error ? error.message : String(error);
-  assert.match(message.toLowerCase(), /post-patch|pre-patch/);
+} catch {
+  invalidReplayTargetRejected = true;
 }
-assert.equal(prePatchReplayRejected, true, "pre-patch target_commit must be rejected at launch");
+assert.equal(invalidReplayTargetRejected, true, "invalid replay target_commit must be rejected at launch");
+
+const prePatchReplayLaunch = await runLaunchEvidenceJob({
+  case_id: "mavlink-battery-status-runtime-replay",
+  test_card_id: "px4-runtime-replay",
+  target_commit: "mavlink-battery-status-bounds-pre",
+  budget_profile: "smoke-fast",
+});
+assert.equal(prePatchReplayLaunch.details.state, "queued");
+assertRunnerProcess(prePatchReplayLaunch.details, {
+  kind: "px4-runtime-replay",
+  entrypoint: "src/runners/px4-runtime-replay-runner.ts",
+});
 
 const replayLaunch = await runLaunchEvidenceJob({
   case_id: "mavlink-battery-status-runtime-replay",
@@ -508,6 +619,17 @@ assertRunnerProcess(replayLaunch.details, {
 assert.equal(existsSync(replayLaunch.details.run_dir), true);
 assert.equal(existsSync(`${replayLaunch.details.run_dir}/job.json`), true);
 assert.equal(existsSync(replayLaunch.details.artifact_dir), true);
+
+const prePatchReplayComplete = await waitForState(
+  prePatchReplayLaunch.details.job_id,
+  (state) => terminalStates.has(state),
+  PX4_RUNTIME_REPLAY_TIMEOUT_MS,
+);
+const prePatchReplayResult = prePatchReplayComplete.details.result;
+assert.ok(prePatchReplayResult, "pre-patch PX4 runtime replay job should have a result");
+assert.equal(prePatchReplayResult.runner_kind, "px4-runtime-replay");
+assert.equal(prePatchReplayResult.px4_runtime_replay?.target_commit, "mavlink-battery-status-bounds-pre");
+assert.equal(prePatchReplayResult.px4_runtime_replay?.resolved_commit_hash, prePatchCommitHash);
 
 const replayComplete = await waitForState(
   replayLaunch.details.job_id,
@@ -622,6 +744,175 @@ if (replayComplete.details.state === "succeeded") {
   assert.equal(existsSync(failurePath!), true);
 }
 
+// ---- Evidence pair comparison -----------------------------------------------
+
+const postLaunchDuplicate = await runLaunchEvidenceJob({
+  case_id: "mavlink-battery-status-bounds",
+  test_card_id: "mavlink-parser-bounds",
+  target_commit: "mavlink-battery-status-bounds-post",
+});
+const postCompleteDuplicate = await waitForState(
+  postLaunchDuplicate.details.job_id,
+  (state) => terminalStates.has(state),
+  STATIC_SOURCE_TIMEOUT_MS,
+);
+
+let sameRolePairRefused = false;
+try {
+  await runCompareEvidencePair({
+    job_id_a: postComplete.details.job_id,
+    job_id_b: postCompleteDuplicate.details.job_id,
+  });
+} catch (error) {
+  sameRolePairRefused = true;
+  const message = error instanceof Error ? error.message : String(error);
+  assert.match(message.toLowerCase(), /same role|post-patch/);
+}
+assert.equal(sameRolePairRefused, true, "compare_evidence_pair must refuse two jobs with the same role");
+
+const postReplayAltBudgetLaunch = await runLaunchEvidenceJob({
+  case_id: "mavlink-battery-status-runtime-replay",
+  test_card_id: "px4-runtime-replay",
+  target_commit: "mavlink-battery-status-bounds-post",
+  budget_profile: "smoke-fast-alt",
+});
+const postReplayAltBudgetComplete = await waitForState(
+  postReplayAltBudgetLaunch.details.job_id,
+  (state) => terminalStates.has(state),
+  PX4_RUNTIME_REPLAY_TIMEOUT_MS,
+);
+
+let budgetProfileMismatchRefused = false;
+try {
+  await runCompareEvidencePair({
+    job_id_a: prePatchReplayComplete.details.job_id,
+    job_id_b: postReplayAltBudgetComplete.details.job_id,
+  });
+} catch (error) {
+  budgetProfileMismatchRefused = true;
+  const message = error instanceof Error ? error.message : String(error);
+  assert.match(message.toLowerCase(), /budget_profile/);
+}
+assert.equal(
+  budgetProfileMismatchRefused,
+  true,
+  "compare_evidence_pair must refuse pairs with mismatched budget_profile",
+);
+
+const pairComparison = await runCompareEvidencePair({
+  job_id_a: prePatchReplayComplete.details.job_id,
+  job_id_b: replayComplete.details.job_id,
+});
+assert.ok(pairComparison.details.pair_id.startsWith("pair-"), "pair_id must use pair- prefix");
+assert.equal(existsSync(join(repoRoot, pairComparison.details.pair_path)), true);
+const pairRecord = JSON.parse(readFileSync(join(repoRoot, pairComparison.details.pair_path), "utf8"));
+assert.equal(pairRecord.case_id, "mavlink-battery-status-runtime-replay");
+assert.equal(pairRecord.test_card_id, "px4-runtime-replay");
+assert.equal(pairRecord.resolved_commit_hashes_differ, true);
+assert.equal(pairRecord.frame_bytes_equal, true);
+assert.equal(pairRecord.budget_profile_equal, true);
+assert.equal(typeof pairRecord.provenance_complete, "boolean");
+assert.equal(typeof pairRecord.frames_delivered_on_both_sides, "boolean");
+assert.equal(typeof pairRecord.meaningful_outcomes_on_both_sides, "boolean");
+assert.equal(typeof pairRecord.verdict_flip_demonstrated, "boolean");
+assert.equal(pairRecord.pre_patch.job_id, prePatchReplayComplete.details.job_id);
+assert.equal(pairRecord.post_patch.job_id, replayComplete.details.job_id);
+assert.equal(pairRecord.pre_patch.resolved_commit_hash, prePatchCommitHash);
+assert.equal(pairRecord.post_patch.resolved_commit_hash, postPatchCommitHash);
+assert.equal(pairRecord.pre_patch.role, "pre-patch");
+assert.equal(pairRecord.post_patch.role, "post-patch");
+if (!replayManifestProvesPostPatch) {
+  assert.equal(pairRecord.provenance_complete, false);
+  assert.equal(pairRecord.frames_delivered_on_both_sides, false);
+  assert.equal(pairRecord.meaningful_outcomes_on_both_sides, false);
+  assert.equal(pairRecord.verdict_flip_demonstrated, false);
+}
+
+const preFrameRecordPath = prePatchReplayResult?.artifact_paths.find((p) => p.endsWith("frame-record.json"));
+const postFrameRecordPath = replayResult?.artifact_paths.find((p) => p.endsWith("frame-record.json"));
+if (preFrameRecordPath && postFrameRecordPath) {
+  const preFrame = JSON.parse(readFileSync(preFrameRecordPath, "utf8"));
+  const postFrame = JSON.parse(readFileSync(postFrameRecordPath, "utf8"));
+  assert.equal(preFrame.frame_hex, postFrame.frame_hex, "crafted frame bytes must match across pre/post replay jobs");
+}
+
+let mismatchedPairRefused = false;
+try {
+  await runCompareEvidencePair({
+    job_id_a: prePatchReplayComplete.details.job_id,
+    job_id_b: fakeFtpComplete.details.job_id,
+  });
+} catch (error) {
+  mismatchedPairRefused = true;
+  const message = error instanceof Error ? error.message : String(error);
+  assert.match(message.toLowerCase(), /same case|test card/);
+}
+assert.equal(mismatchedPairRefused, true, "compare_evidence_pair must refuse mismatched case/card pairs");
+
+const syntheticFrameHex = "fd0900000101010100000000000000000000000000000000000000000000000000000000000000";
+const syntheticPreJobId = "job-smoke-synthetic-pre";
+const syntheticPostJobId = "job-smoke-synthetic-post";
+const syntheticMismatchPostJobId = "job-smoke-synthetic-post-mismatch";
+
+await writeSyntheticReplayJob({
+  job_id: syntheticPreJobId,
+  case_id: "mavlink-battery-status-runtime-replay",
+  test_card_id: "px4-runtime-replay",
+  target_commit: "mavlink-battery-status-bounds-pre",
+  budget_profile: "smoke-fast",
+  resolved_commit_hash: prePatchCommitHash,
+  outcome: "runtime_anomalous",
+  frame_delivered: true,
+  firmware_commit_proven: true,
+  frame_hex: syntheticFrameHex,
+});
+await writeSyntheticReplayJob({
+  job_id: syntheticPostJobId,
+  case_id: "mavlink-battery-status-runtime-replay",
+  test_card_id: "px4-runtime-replay",
+  target_commit: "mavlink-battery-status-bounds-post",
+  budget_profile: "smoke-fast",
+  resolved_commit_hash: postPatchCommitHash,
+  outcome: "runtime_clean",
+  frame_delivered: true,
+  firmware_commit_proven: true,
+  frame_hex: syntheticFrameHex,
+});
+await writeSyntheticReplayJob({
+  job_id: syntheticMismatchPostJobId,
+  case_id: "mavlink-battery-status-runtime-replay",
+  test_card_id: "px4-runtime-replay",
+  target_commit: "mavlink-battery-status-bounds-post",
+  budget_profile: "smoke-fast",
+  resolved_commit_hash: postPatchCommitHash,
+  outcome: "runtime_clean",
+  frame_delivered: true,
+  firmware_commit_proven: true,
+  frame_hex: `${syntheticFrameHex}ff`,
+});
+
+let frameMismatchRefused = false;
+try {
+  await runCompareEvidencePair({
+    job_id_a: syntheticPreJobId,
+    job_id_b: syntheticMismatchPostJobId,
+  });
+} catch (error) {
+  frameMismatchRefused = true;
+  const message = error instanceof Error ? error.message : String(error);
+  assert.match(message.toLowerCase(), /frame bytes differ|crafted frame/);
+}
+assert.equal(frameMismatchRefused, true, "compare_evidence_pair must refuse mismatched frame bytes");
+
+const syntheticTruePair = await runCompareEvidencePair({
+  job_id_a: syntheticPreJobId,
+  job_id_b: syntheticPostJobId,
+});
+assert.equal(syntheticTruePair.details.pair.verdict_flip_demonstrated, true);
+assert.equal(syntheticTruePair.details.pair.frames_delivered_on_both_sides, true);
+assert.equal(syntheticTruePair.details.pair.meaningful_outcomes_on_both_sides, true);
+assert.equal(syntheticTruePair.details.pair.outcomes_differ, true);
+
 // ---- Tool surface ----------------------------------------------------------
 
 const { session } = await createContactDepartureSession();
@@ -697,14 +988,38 @@ try {
           artifacts: probeResult?.artifact_paths,
         },
         px4RuntimeReplay: {
-          job_id: replayComplete.details.job_id,
-          state: replayComplete.details.state,
-          verdict: replayResult?.verdict,
-          runner_kind: replayResult?.runner_kind,
-          outcome: replayResult?.px4_runtime_replay?.outcome,
-          resolved_commit_hash: replayResult?.px4_runtime_replay?.resolved_commit_hash,
-          frame_delivered: replayResult?.px4_runtime_replay?.frame_delivered,
-          artifacts: replayResult?.artifact_paths,
+          pre: {
+            job_id: prePatchReplayComplete.details.job_id,
+            state: prePatchReplayComplete.details.state,
+            outcome: prePatchReplayResult?.px4_runtime_replay?.outcome,
+            resolved_commit_hash: prePatchReplayResult?.px4_runtime_replay?.resolved_commit_hash,
+          },
+          post: {
+            job_id: replayComplete.details.job_id,
+            state: replayComplete.details.state,
+            verdict: replayResult?.verdict,
+            runner_kind: replayResult?.runner_kind,
+            outcome: replayResult?.px4_runtime_replay?.outcome,
+            resolved_commit_hash: replayResult?.px4_runtime_replay?.resolved_commit_hash,
+            frame_delivered: replayResult?.px4_runtime_replay?.frame_delivered,
+            artifacts: replayResult?.artifact_paths,
+          },
+        },
+        evidencePair: {
+          pair_id: pairComparison.details.pair_id,
+          pair_path: pairComparison.details.pair_path,
+          outcomes_differ: pairRecord.outcomes_differ,
+          resolved_commit_hashes_differ: pairRecord.resolved_commit_hashes_differ,
+          frame_bytes_equal: pairRecord.frame_bytes_equal,
+          budget_profile_equal: pairRecord.budget_profile_equal,
+          provenance_complete: pairRecord.provenance_complete,
+          frames_delivered_on_both_sides: pairRecord.frames_delivered_on_both_sides,
+          meaningful_outcomes_on_both_sides: pairRecord.meaningful_outcomes_on_both_sides,
+          verdict_flip_demonstrated: pairRecord.verdict_flip_demonstrated,
+          synthetic_true_pair: {
+            pair_id: syntheticTruePair.details.pair_id,
+            verdict_flip_demonstrated: syntheticTruePair.details.pair.verdict_flip_demonstrated,
+          },
         },
       },
       null,

@@ -121,9 +121,20 @@ export class Px4RuntimeReplayValidationError extends Error {
   }
 }
 
-export interface ValidatedPostPatchTarget {
+export interface ValidatedReplayTarget {
   resolved_commit_hash: string;
   alias?: string;
+  role: "pre-patch" | "post-patch";
+}
+
+export async function resolvePrePatchCommitHash(
+  staticConfig?: Awaited<ReturnType<typeof loadStaticSourceConfig>>,
+  replayConfig?: Px4RuntimeReplayConfig,
+): Promise<string> {
+  const staticCfg = staticConfig ?? (await loadStaticSourceConfig());
+  const replayCfg = replayConfig ?? (await loadPx4RuntimeReplayConfig());
+  const caseConfig = staticCfg.cases[replayCfg.static_source_case_id];
+  return staticCfg.aliases[caseConfig.pre_alias].commit_hash;
 }
 
 export async function resolvePostPatchCommitHash(
@@ -140,7 +151,7 @@ export function validatePx4RuntimeReplayTarget(
   targetCommit: string,
   replayConfig: Px4RuntimeReplayConfig,
   staticConfig: Awaited<ReturnType<typeof loadStaticSourceConfig>>,
-): ValidatedPostPatchTarget {
+): ValidatedReplayTarget {
   let resolved;
   try {
     resolved = resolveTarget(replayConfig.static_source_case_id, targetCommit, staticConfig);
@@ -156,21 +167,18 @@ export function validatePx4RuntimeReplayTarget(
   const postHash = staticConfig.aliases[caseConfig.post_alias].commit_hash.toLowerCase();
   const hash = resolved.resolved_commit_hash.toLowerCase();
 
-  if (resolved.role === "pre-patch" || hash === preHash) {
+  if (hash !== preHash && hash !== postHash) {
     throw new Px4RuntimeReplayValidationError(
-      `target_commit "${targetCommit}" resolves to the pre-patch commit (${caseConfig.pre_alias}). Runtime replay for this milestone accepts post-patch commits only (use ${caseConfig.post_alias}).`,
+      `target_commit "${targetCommit}" does not resolve to a pinned pre-patch or post-patch commit for this case (expected ${caseConfig.pre_alias}, ${caseConfig.post_alias}, or their commit hashes).`,
     );
   }
 
-  if (hash !== postHash) {
-    throw new Px4RuntimeReplayValidationError(
-      `target_commit "${targetCommit}" does not resolve to the post-patch commit for this milestone (expected alias ${caseConfig.post_alias} or hash ${postHash}). Pre-patch and arbitrary commits are not supported yet.`,
-    );
-  }
+  const role = hash === preHash ? "pre-patch" : "post-patch";
 
   return {
     resolved_commit_hash: resolved.resolved_commit_hash,
     alias: resolved.alias,
+    role,
   };
 }
 

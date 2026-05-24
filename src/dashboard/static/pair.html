@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Evidence Pair — Contact Departure</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Verdict-flip comparison</p>
+          <h1>Evidence Pair</h1>
+          <p class="subhead">Side-by-side pre-patch vs post-patch replay evidence from <code>pair.json</code>.</p>
+        </div>
+        <div class="topbar__meta">
+          <a class="text-link" href="/">Back to jobs</a>
+          <span id="pair-status" class="health health--loading">Loading pair</span>
+        </div>
+      </header>
+
+      <section id="pair-empty" class="empty-card">
+        <h2>No pair selected</h2>
+        <p>Open this page with <code>?pair_id=pair-...</code> or choose a pair from the jobs dashboard.</p>
+      </section>
+
+      <article id="pair-detail" class="pair-detail hidden">
+        <div class="pair-header">
+          <div>
+            <p id="pair-case" class="eyebrow"></p>
+            <h2 id="pair-title"></h2>
+            <p id="pair-meta" class="summary-text"></p>
+          </div>
+          <span id="pair-flip-indicator" class="status-pill">pending</span>
+        </div>
+
+        <ul id="pair-conditions" class="pair-conditions" aria-label="Verdict flip supporting conditions"></ul>
+
+        <div class="pair-columns" aria-label="Pre-patch vs post-patch comparison">
+          <section class="pair-column" aria-label="Pre-patch job">
+            <div class="section-head">
+              <h3>Pre-patch</h3>
+              <p id="pre-patch-job-id"></p>
+            </div>
+            <dl id="pre-patch-summary" class="metadata-list"></dl>
+            <div id="pre-patch-artifacts" class="artifact-list compact"></div>
+          </section>
+
+          <section class="pair-column" aria-label="Post-patch job">
+            <div class="section-head">
+              <h3>Post-patch</h3>
+              <p id="post-patch-job-id"></p>
+            </div>
+            <dl id="post-patch-summary" class="metadata-list"></dl>
+            <div id="post-patch-artifacts" class="artifact-list compact"></div>
+          </section>
+        </div>
+      </article>
+    </main>
+    <script type="module" src="/pair.js"></script>
+  </body>
+</html>
