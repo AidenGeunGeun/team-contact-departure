@@ -7,7 +7,11 @@ import {
   type JobState,
   type RunnerKind,
 } from "./jobs.js";
-import { loadPx4RuntimeReplayConfig } from "./px4-runtime-replay.js";
+import {
+  loadPx4RuntimeReplayConfig,
+  normalizeSanitizersList,
+  sanitizersListsEqual,
+} from "./px4-runtime-replay.js";
 import {
   loadStaticSourceConfig,
   type StaticSourceConfig,
@@ -27,6 +31,7 @@ export interface EvidencePairJobSummary {
   outcome?: string;
   firmware_commit_proven?: boolean;
   frame_delivered?: boolean;
+  sanitizers_used?: string[];
   role?: "pre-patch" | "post-patch";
 }
 
@@ -42,8 +47,10 @@ export interface EvidencePairRecord {
   frame_bytes_equal: boolean;
   provenance_complete: boolean;
   budget_profile_equal: boolean;
+  sanitizers_used_equal: boolean;
   frames_delivered_on_both_sides: boolean;
   meaningful_outcomes_on_both_sides: boolean;
+  roles_correctly_assigned: boolean;
   verdict_flip_demonstrated: boolean;
 }
 
@@ -173,6 +180,7 @@ function extractJobSummary(jobId: string, record: JobRecordFile, result: Evidenc
       outcome: replay.outcome,
       firmware_commit_proven: replay.firmware_commit_proven,
       frame_delivered: replay.frame_delivered,
+      sanitizers_used: replay.sanitizers_used ?? [],
     };
   }
 
@@ -284,6 +292,20 @@ function validateBudgetProfileMatch(jobA: JobRecordFile, jobB: JobRecordFile): v
   }
 }
 
+function extractSanitizersUsed(summary: EvidencePairJobSummary): string[] {
+  return normalizeSanitizersList(summary.sanitizers_used);
+}
+
+function validateSanitizersUsedMatch(summaryA: EvidencePairJobSummary, summaryB: EvidencePairJobSummary): void {
+  const sanitizersA = extractSanitizersUsed(summaryA);
+  const sanitizersB = extractSanitizersUsed(summaryB);
+  if (!sanitizersListsEqual(sanitizersA, sanitizersB)) {
+    throw new EvidencePairError(
+      `Jobs must use the same sanitizers_used configuration to compare evidence. Got [${sanitizersA.join(", ") || "none"}] vs [${sanitizersB.join(", ") || "none"}].`,
+    );
+  }
+}
+
 function validatePairComposition(
   summaryA: EvidencePairJobSummary,
   summaryB: EvidencePairJobSummary,
@@ -368,6 +390,10 @@ export function buildEvidencePairRecord(input: {
     pre_patch.resolved_commit_hash !== post_patch.resolved_commit_hash;
   const frame_bytes_equal = true;
   const budget_profile_equal = true;
+  const sanitizers_used_equal = sanitizersListsEqual(
+    extractSanitizersUsed(pre_patch),
+    extractSanitizersUsed(post_patch),
+  );
   const provenance_complete =
     pre_patch.firmware_commit_proven === true && post_patch.firmware_commit_proven === true;
   const frames_delivered_on_both_sides =
@@ -382,7 +408,8 @@ export function buildEvidencePairRecord(input: {
     meaningful_outcomes_on_both_sides &&
     outcomes_differ &&
     frame_bytes_equal &&
-    budget_profile_equal;
+    budget_profile_equal &&
+    sanitizers_used_equal;
 
   return {
     pair_id: input.pair_id,
@@ -396,8 +423,10 @@ export function buildEvidencePairRecord(input: {
     frame_bytes_equal,
     provenance_complete,
     budget_profile_equal,
+    sanitizers_used_equal,
     frames_delivered_on_both_sides,
     meaningful_outcomes_on_both_sides,
+    roles_correctly_assigned,
     verdict_flip_demonstrated,
   };
 }
@@ -472,6 +501,7 @@ export async function compareEvidencePair(params: CompareEvidencePairInput): Pro
   }
 
   validateBudgetProfileMatch(jobA.record, jobB.record);
+  validateSanitizersUsedMatch(jobA.summary, jobB.summary);
 
   const staticSourceCaseId = await resolveStaticSourceCaseId(caseA);
   if (!staticSourceCaseId) {

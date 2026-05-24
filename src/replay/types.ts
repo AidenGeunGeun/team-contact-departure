@@ -20,7 +20,7 @@ export interface BundleManifest {
   test_card_id: string;
   target_commit: string;
   budget_profile: string;
-  pinned_inputs: Record<string, string | number | boolean>;
+  pinned_inputs: Record<string, string | number | boolean | string[]>;
   recorded_result: BundleRecordedResult;
   replay_kind: ReplayKind;
   replay_kind_reason: string;

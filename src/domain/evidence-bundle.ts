@@ -163,6 +163,23 @@ async function writeReplayScript(bundleDir: string): Promise<void> {
 }
 
 function buildReadme(manifest: BundleManifest): string {
+  const pinnedSanitizers = Array.isArray(manifest.pinned_inputs.sanitizers_used)
+    ? manifest.pinned_inputs.sanitizers_used
+    : [];
+  const recordedSummary = manifest.recorded_result.summary ?? "";
+  const sanitizerInstrumentationNote =
+    manifest.runner_kind === "px4-runtime-replay" &&
+    manifest.recorded_result.outcome === "runtime_anomalous" &&
+    (pinnedSanitizers.length > 0 ||
+      /AddressSanitizer|UndefinedBehaviorSanitizer|sanitizer findings/i.test(recordedSummary))
+      ? [
+          "## Sanitizer instrumentation",
+          "",
+          "This run used ASan/UBSan-instrumented PX4 firmware (see `pinned_inputs.sanitizers_used` in `manifest.json`). The recorded `runtime_anomalous` outcome may reflect sanitizer findings in PX4 output while the process was still running — structural instrumentation evidence, not a crash-exit verdict, and not vulnerability discovery or a safety claim.",
+          "",
+        ]
+      : [];
+
   return [
     `# Evidence Bundle: ${manifest.bundle_id}`,
     "",
@@ -170,7 +187,9 @@ function buildReadme(manifest: BundleManifest): string {
     "",
     `This bundle packages a completed **${manifest.runner_kind}** evidence run for case \`${manifest.case_id}\` (test card \`${manifest.test_card_id}\`).`,
     `Recorded verdict: **${manifest.recorded_result.verdict}**.`,
+    recordedSummary ? `Summary: ${recordedSummary}` : "",
     "",
+    ...sanitizerInstrumentationNote,
     "## Replay",
     "",
     "Replay re-derives the recorded verdict without the LLM, agent session, or any model-facing tool.",
@@ -215,8 +234,8 @@ async function buildPinnedInputs(
   record: JobRecordFile,
   result: EvidenceResult,
   artifactDir: string,
-): Promise<Record<string, string | number | boolean>> {
-  const pinned: Record<string, string | number | boolean> = {
+): Promise<Record<string, string | number | boolean | string[]>> {
+  const pinned: Record<string, string | number | boolean | string[]> = {
     target_commit: record.request.target_commit,
     budget_profile: record.request.budget_profile ?? "smoke-fast",
   };
@@ -238,6 +257,13 @@ async function buildPinnedInputs(
   if (runnerKind === "px4-runtime-replay" && result.px4_runtime_replay) {
     pinned.px4_commit_hash = result.px4_runtime_replay.resolved_commit_hash;
     pinned.pymavlink_version = result.px4_runtime_replay.pymavlink_version;
+    pinned.sanitizers_used = result.px4_runtime_replay.sanitizers_used ?? [];
+    if (result.px4_runtime_replay.build_method) {
+      pinned.build_method = result.px4_runtime_replay.build_method;
+    }
+    if (result.px4_runtime_replay.binary_path) {
+      pinned.binary_path = result.px4_runtime_replay.binary_path;
+    }
     const framePath = join(artifactDir, "frame-record.json");
     if (existsSync(framePath)) {
       const frame = await readJson<{ frame_hex?: string }>(framePath);

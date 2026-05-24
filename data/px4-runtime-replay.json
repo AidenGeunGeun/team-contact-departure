@@ -30,6 +30,14 @@
       "replay_timeout_sec": 90,
       "heartbeat_timeout_sec": 45,
       "observation_sec": 10
+    },
+    "asan-default": {
+      "attempt_build": true,
+      "build_timeout_sec": 1200,
+      "replay_timeout_sec": 120,
+      "heartbeat_timeout_sec": 60,
+      "observation_sec": 15,
+      "sanitizers_enabled": ["asan", "ubsan"]
     }
   }
 }

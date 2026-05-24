@@ -39,7 +39,7 @@ That contract is enforceable in code, not just claimed in slides.
 - A real MAVLink parser-library fuzz runner can exercise pymavlink against mutated frames and capture outcomes.
 - A real PX4 SITL runtime probe can either boot PX4 and observe MAVLink behavior or honestly report why the local environment could not.
 - A real PX4 BATTERY_STATUS runtime replay can build PX4 at a pinned commit (provenance-gated), deliver a crafted frame, and record what the firmware did.
-- Two completed pre/post replay jobs can be compared into a pair artifact whose `verdict_flip_demonstrated` field is `true` only when seven independent conditions all hold (correct roles from hash, proven provenance on both sides, delivered frames, meaningful runtime outcomes, differing outcomes, byte-equal frames, matching budget profile).
+- Two completed pre/post replay jobs can be compared into a pair artifact whose `verdict_flip_demonstrated` field is `true` only when eight independent conditions all hold (correct roles from hash, proven provenance on both sides, delivered frames, meaningful runtime outcomes, differing outcomes, byte-equal frames, matching budget profile, matching `sanitizers_used`).
 - Any completed job or pair can be bundled and replayed by a reviewer without the LLM, with replay rigor honestly labeled per runner kind.
 
 **Does not claim:**
@@ -114,9 +114,10 @@ This is the headline. Same case, same methodology card, same crafted MAVLink fra
 - Same resolved commit hash.
 - Either commit hash does not map to a known role for the case.
 - `case_id`, `test_card_id`, or `budget_profile` differ between the two jobs.
+- `sanitizers_used` differ between the two jobs (for example one side built with ASan/UBSan and the other without).
 - Embedded `frame-record.json` bytes differ between the two jobs.
 
-When refusal conditions are not triggered, `pair.json` is written. Its headline field, **`verdict_flip_demonstrated`**, is `true` only when all seven of these conditions hold:
+When refusal conditions are not triggered, `pair.json` is written. Its headline field, **`verdict_flip_demonstrated`**, is `true` only when all eight of these conditions hold:
 
 1. Roles correctly derived from `resolved_commit_hash` via lookup against `data/static-source-commits.json` (no lexicographic fallback).
 2. Both jobs have `firmware_commit_proven: true` (manifest-verified or freshly built at the pinned commit).
@@ -125,12 +126,13 @@ When refusal conditions are not triggered, `pair.json` is written. Its headline 
 5. Outcomes differ between the two jobs.
 6. `frame_bytes_equal` is `true`.
 7. `budget_profile_equal` is `true`.
+8. `sanitizers_used_equal` is `true` (both jobs used the same sanitizer instrumentation configuration recorded in the build manifest).
 
-If any one condition fails, `verdict_flip_demonstrated` is `false` and `pair.json` records which supporting conditions hold and which do not — a reviewer reading the JSON alone can see exactly what is and is not proven. The dashboard renders the pair side-by-side at `/pair.html?pair_id=...` with `verdict_flip_demonstrated` as the headline indicator and the seven conditions as a checklist.
+If any one condition fails, `verdict_flip_demonstrated` is `false` and `pair.json` records which supporting conditions hold and which do not — a reviewer reading the JSON alone can see exactly what is and is not proven. The dashboard renders the pair side-by-side at `/pair.html?pair_id=...` with `verdict_flip_demonstrated` as the headline indicator and the eight conditions as a checklist.
 
 This is one firmware-driven runtime difference against one crafted frame. It is not vulnerability discovery and not a safety claim. The outcome comes from what PX4 actually does at runtime; the runner does not hardcode pre-patch as anomalous or post-patch as clean.
 
-**Producing a live `verdict_flip_demonstrated: true` pair requires verified PX4 builds at both commits on the local machine.** Offline smoke uses `smoke-fast` budget which skips PX4 builds; in that mode the live pair reports `verdict_flip_demonstrated: false`. The pair tool's logic is proven against synthetic fixtures in offline smoke, including the `verdict_flip_demonstrated: true` true-path and refusal of every invalid pair composition (same role, same hash, unmapped role, case/card mismatch, budget mismatch, frame mismatch).
+**Producing a live `verdict_flip_demonstrated: true` pair requires verified PX4 builds at both commits on the local machine.** For the headline runtime flip on the bounds-test frame, use `budget_profile: "asan-default"` so PX4 is built with AddressSanitizer and UndefinedBehaviorSanitizer enabled; without sanitizers the pre-patch path may stay `runtime_clean` on both sides. Offline smoke uses `smoke-fast` budget which skips PX4 builds; in that mode the live pair reports `verdict_flip_demonstrated: false`. The pair tool's logic is proven against synthetic fixtures in offline smoke, including the `verdict_flip_demonstrated: true` true-path (with and without sanitizer metadata), refusal of every invalid pair composition (same role, same hash, unmapped role, case/card mismatch, budget mismatch, mixed sanitizers, frame mismatch), and bundle replay refusal when `pinned_inputs.sanitizers_used` does not match the local build manifest.
 
 ## Replayable evidence bundles
 
@@ -158,10 +160,10 @@ Replay scripts live under `src/replay/` and import zero agent/session/pi/LLM mod
 | `static-source-evidence` | full | Re-fetches PX4 at `pinned_inputs.px4_commit_hash`, verifies the resolved hash matches, and re-runs the source-pattern check. |
 | `mavlink-parser-fuzz` | full (if local venv has the pinned pymavlink version) | Verifies the venv's installed pymavlink equals `pinned_inputs.pymavlink_version`; refuses with both versions named on mismatch; otherwise re-runs the harness with the pinned random seed. |
 | `px4-sitl-probe` | partial | Re-runs preflight against the current environment and compares findings to the bundled preflight; reports still-hold and differ entries; does not re-boot PX4. |
-| `px4-runtime-replay` | partial (full only when a verified PX4 build manifest matches the recorded commit) | Verifies frame bytes and artifact structure; can optionally re-deliver the frame when the local build matches. |
+| `px4-runtime-replay` | partial (full only when a verified PX4 build manifest matches the recorded commit and `sanitizers_used`) | Verifies frame bytes and artifact structure; refuses replay when pinned `sanitizers_used` differs from the local build manifest; can optionally re-deliver the frame when commit and sanitizer configuration match. |
 | `pair` | full | Recomputes `pair.json` from embedded job results, byte-compares the result, and byte-compares the embedded frame records. |
 
-**Honesty contract:** partial replay paths do not say "Verdict match" — replay output for those paths explicitly says "Verdict not re-derived; bundled record and re-evaluable signals verified." Tampering with `manifest.json` (for example changing the recorded verdict) causes replay to exit non-zero with a clear FAIL line. Offline smoke exercises tampered-verdict, pymavlink-version-mismatch, static-source-commit-mismatch, and pair-frame-tamper failure cases.
+**Honesty contract:** partial replay paths do not say "Verdict match" — replay output for those paths explicitly says "Verdict not re-derived; bundled record and re-evaluable signals verified." Tampering with `manifest.json` (for example changing the recorded verdict) causes replay to exit non-zero with a clear FAIL line. Offline smoke exercises tampered-verdict, pymavlink-version-mismatch, static-source-commit-mismatch, runtime-replay-sanitizer-mismatch, and pair-frame-tamper failure cases.
 
 ## Per-runner detail
 
@@ -188,7 +190,7 @@ The runner writes a preflight report for build/runtime dependencies (git, cmake,
 
 ### PX4 BATTERY_STATUS runtime replay (`mavlink-battery-status-runtime-replay`)
 
-The runner resolves `target_commit` to a pinned PX4 hash, writes preflight, records the exact crafted frame bytes (`frame-record.json`, `frame-record.hex`), checks out PX4 at the resolved commit, builds or reuses `px4_sitl_default` when budget allows, boots headless PX4 SITL, waits for MAVLink, delivers the bounds-test frame via pymavlink, and observes whether PX4 stays up. `runtime_clean` means PX4 booted, the frame was delivered, and no crash or abnormal log markers were observed in the observation window. `runtime_anomalous` means the frame was delivered but PX4 exited or logged abnormal markers — warrants follow-up, not a vulnerability verdict. `runtime_unavailable` means prerequisites or a verified build manifest were missing. Binary provenance is enforced: the runner refuses to claim a commit association without a manifest-verified or freshly-built binary at that commit (`firmware_commit_proven` field reflects this honestly).
+The runner resolves `target_commit` to a pinned PX4 hash, writes preflight, records the exact crafted frame bytes (`frame-record.json`, `frame-record.hex`), checks out PX4 at the resolved commit, builds or reuses `px4_sitl_default` when budget allows (`asan-default` enables ASan/UBSan via `px4_sitl_default_asan` on Linux or equivalent CMAKE sanitizer flags), boots headless PX4 SITL, waits for MAVLink, delivers the bounds-test frame via pymavlink, and observes whether PX4 stays up. `runtime_clean` means PX4 booted, the frame was delivered, and no crash, abnormal log markers, or sanitizer findings were observed in the observation window. `runtime_anomalous` means the frame was delivered but PX4 exited, logged abnormal markers, or ASan/UBSan reported findings (PX4 may still be running when only sanitizers fired — structural instrumentation evidence, not a crash-exit verdict). `runtime_unavailable` means prerequisites or a verified build manifest were missing. Binary provenance is enforced: the runner refuses to claim a commit association without a manifest-verified or freshly-built binary at that commit with matching `sanitizers_enabled` (`firmware_commit_proven` and `sanitizers_used` reflect this honestly).
 
 ### Fake-smoke (FTP path handling, vague telemetry claim)
 
@@ -215,7 +217,7 @@ API surface (all GET, no mutation endpoints):
 Pages:
 
 - `/` — job list and detail.
-- `/pair.html?pair_id=<pair_id>` — side-by-side verdict flip view with the seven-condition checklist.
+- `/pair.html?pair_id=<pair_id>` — side-by-side verdict flip view with the eight-condition checklist.
 - `/bundles.html` — bundle list.
 - `/bundle.html?bundle_id=<bundle_id>` — manifest, artifact paths, and the exact `npm run replay` command.
 
@@ -246,7 +248,7 @@ agent-runs/<timestamp>/summary.json
 | Command | What it proves |
 | --- | --- |
 | `npm run typecheck` | TypeScript compiles. |
-| `npm run smoke:offline` | Tool allowlist (eight tools, no shell escape), job lifecycle, all four real runners, fake runners, pair comparison (including same-role/case-mismatch/budget-mismatch/frame-mismatch refusal and synthetic `verdict_flip_demonstrated: true` fixture), bundle creation and replay (including pymavlink-mismatch, static-commit-mismatch, pair-frame-tamper, and tampered-verdict FAIL fixtures), cancellation, and artifacts work without model calls. |
+| `npm run smoke:offline` | Tool allowlist (eight tools, no shell escape), job lifecycle, all four real runners, fake runners, pair comparison (including same-role/case-mismatch/budget-mismatch/mixed-sanitizer/frame-mismatch refusal and synthetic `verdict_flip_demonstrated: true` fixtures with eight-condition gate), bundle creation and replay (including pymavlink-mismatch, static-commit-mismatch, runtime-replay-sanitizer-mismatch, pair-frame-tamper, and tampered-verdict FAIL fixtures), cancellation, and artifacts work without model calls. |
 | `npm run smoke:operator` | Agent transcript/report formatting works without model calls. |
 | `npm run smoke:dashboard` | Dashboard health, job detail, pair list and detail API, bundle list and detail pages, artifact fetch, traversal rejection, blocked mutation methods. |
 | `npm run demo:agent` | The product-facing agent orchestrates the parser-bounds case end to end and writes a transcript. Requires `openai-codex` auth. |
@@ -266,7 +268,7 @@ For a 10–15 minute review:
 4. **Inspect a `static-source-evidence` job.** Open `source-context.md`, `commit-info.json`, and `diff.patch` in the artifact preview. Confirm the static-only caveat appears in the result summary.
 5. **Inspect a `mavlink-parser-fuzz` job.** Open `evidence-summary.md` and `parser-outcomes.csv`. Confirm the parser-library-only caveat.
 6. **Inspect a `mavlink-battery-status-runtime-replay` job.** Open `frame-record.hex`, `delivery-record.json`, and `runtime.log`. Note that on a machine without a verified PX4 build, the outcome is `runtime_unavailable` with `firmware_commit_proven: false` — that is the honest local result, not a failure.
-7. **Open a pair page** at `/pair.html?pair_id=<some-pair-id>` from the dashboard list. Note the seven-condition checklist and the explicit `verdict_flip_demonstrated` indicator. Without a verified PX4 build, the indicator is `false` because runtime outcomes are not meaningful — this is the honesty contract working.
+7. **Open a pair page** at `/pair.html?pair_id=<some-pair-id>` from the dashboard list. Note the eight-condition checklist and the explicit `verdict_flip_demonstrated` indicator. Without a verified PX4 build, the indicator is `false` because runtime outcomes are not meaningful — this is the honesty contract working.
 8. **Open the bundles list** at `/bundles.html`. Pick a bundle, open it, copy the replay command from the detail page.
 9. **Run `npm run replay -- bundles/<bundle_id>`.** Note PASS for an untampered bundle. For static-source and parser-fuzz bundles, replay actually re-derives the verdict. For SITL/runtime bundles, replay re-evaluates what it can and reports "Verdict not re-derived; bundled record and re-evaluable signals verified" — that wording is deliberate.
 10. **Optional:** authenticate `pi` with `npx pi` then `/login openai-codex`, run `npm run demo:agent`. Watch the agent orchestrate. Read `agent-runs/<timestamp>/transcript.md` to see the tool sequence the model chose.
@@ -288,7 +290,7 @@ src/domain/static-source-evidence.ts   real PX4 static-source evidence
 src/domain/mavlink-parser-fuzz.ts      real pymavlink parser-library fuzz
 src/domain/px4-sitl-probe.ts          real PX4 SITL runtime probe (preflight helper also reused at replay time)
 src/domain/px4-runtime-replay.ts      real PX4 runtime replay with provenance gate
-src/domain/evidence-pair.ts           pair comparison with seven-condition gate
+src/domain/evidence-pair.ts           pair comparison with eight-condition gate
 src/domain/evidence-bundle.ts         bundle packaging
 src/runners/                       standalone runner entrypoints and Python harnesses
 src/replay/                        CLI replay per runner kind (no agent imports — strict isolation)
@@ -304,7 +306,7 @@ specs/                             ignored: planning specs (kept local for devel
 ## Limitations and environment requirements
 
 - **Live PX4 runtime requires local build environment.** `npm run smoke:offline` uses `smoke-fast` budget which skips PX4 builds and exercises the runtime-unavailable path stably. For `runtime_observed` from the SITL probe or `runtime_clean` from runtime replay, the machine needs Python 3, build tools (git, cmake, make, g++; ninja recommended), and either a prepared `.cache/px4/build/px4_sitl_default/bin/px4` with a matching build manifest or the bandwidth/time to fetch and build PX4 on first run.
-- **Live `verdict_flip_demonstrated: true` requires verified builds at both commits.** The pair tool's strict gate refuses to claim a flip without `firmware_commit_proven: true` on both sides and meaningful runtime outcomes (not `runtime_unavailable`). The synthetic fixture in offline smoke proves the true-path works on constructed inputs; producing a live true pair is an environment exercise.
+- **Live `verdict_flip_demonstrated: true` requires verified builds at both commits.** Use `asan-default` when you need sanitizer-instrumented runtime evidence; sanitizer builds are slower and are typically run on a Linux CPU host with a full PX4 toolchain. The pair tool's strict gate refuses to claim a flip without `firmware_commit_proven: true` on both sides, matching `sanitizers_used`, and meaningful runtime outcomes (not `runtime_unavailable`). Offline smoke does not run real ASan PX4 builds; synthetic fixtures prove the eight-condition gate and refusal paths. Producing a live true pair on instrumented firmware is an environment exercise (often a rented Linux CPU pod).
 - **Static-source replay needs network for the first PX4 fetch** unless `.cache/px4` is already warm. Subsequent replays of the same commit are offline.
 - **Parser-fuzz replay needs the local venv with the pinned pymavlink version.** Replay refuses with both versions named if the installed pymavlink differs from `pinned_inputs.pymavlink_version`.
 - **Partial replay (SITL probe, runtime replay without verified build) does not prove runtime behavior on its own.** It re-evaluates what it can (preflight, artifact structure, recorded inputs) and says so explicitly in the report — replay output for partial paths never claims "Verdict match."

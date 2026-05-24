@@ -34,6 +34,14 @@ export interface Px4RuntimeReplayBudgetProfile {
   replay_timeout_sec: number;
   heartbeat_timeout_sec: number;
   observation_sec: number;
+  sanitizers_enabled?: string[];
+}
+
+export interface SanitizerFinding {
+  kind: string;
+  message: string;
+  source_location?: string;
+  context?: string;
 }
 
 export interface Px4RuntimeReplayConfig {
@@ -82,6 +90,7 @@ export interface Px4RuntimeReplayHarnessSummary {
   mavlink_connection?: string;
   frame_seed_id?: string;
   frame_delivered?: boolean;
+  sanitizer_findings?: SanitizerFinding[];
   error?: string;
 }
 
@@ -94,10 +103,13 @@ export interface Px4RuntimeReplayEvidence {
   mavlink_connection: string;
   px4_binary_present: boolean;
   px4_binary_path: string;
+  build_method?: SitlBuildMethod;
   target_commit: string;
   resolved_commit_hash: string;
   frame_delivered: boolean;
   firmware_commit_proven: boolean;
+  sanitizers_used: string[];
+  sanitizer_findings: SanitizerFinding[];
   preflight: PreflightReport;
   setup_note: string;
 }
@@ -221,6 +233,35 @@ function px4Root(config: Px4RuntimeReplayConfig): string {
   return join(REPO_ROOT, config.px4_cache_dir);
 }
 
+export type SitlBuildMethod =
+  | "px4_sitl_default"
+  | "px4_sitl_default_asan"
+  | "cmake_flags_asan"
+  | "cmake_flags_default";
+
+const BUILD_METHOD_BINARY_RELATIVE: Record<SitlBuildMethod, string> = {
+  px4_sitl_default: "build/px4_sitl_default/bin/px4",
+  px4_sitl_default_asan: "build/px4_sitl_default_asan/bin/px4",
+  cmake_flags_asan: "build/px4_sitl_default/bin/px4",
+  cmake_flags_default: "build/px4_sitl_default/bin/px4",
+};
+
+const SANITIZER_BUILD_METHODS = new Set<SitlBuildMethod>([
+  "px4_sitl_default_asan",
+  "cmake_flags_asan",
+]);
+
+function sitlBinaryRelativeForBuildMethod(buildMethod: SitlBuildMethod): string {
+  return BUILD_METHOD_BINARY_RELATIVE[buildMethod];
+}
+
+export function binaryPathForBuildMethod(
+  config: Px4RuntimeReplayConfig,
+  buildMethod: SitlBuildMethod,
+): string {
+  return join(px4Root(config), sitlBinaryRelativeForBuildMethod(buildMethod));
+}
+
 function px4BinaryPath(config: Px4RuntimeReplayConfig): string {
   return join(px4Root(config), config.sitl_binary_relative);
 }
@@ -230,11 +271,49 @@ function buildManifestPath(config: Px4RuntimeReplayConfig): string {
   return join(px4Root(config), filename);
 }
 
-interface SitlBuildManifest {
+export interface Px4SitlBuildManifest {
   commit_hash: string;
+  build_method: SitlBuildMethod;
   sitl_binary_relative: string;
   binary_path: string;
   built_at: string;
+  sanitizers_enabled: string[];
+}
+
+type SitlBuildManifest = Px4SitlBuildManifest;
+
+function buildMethodMatchesSanitizerRequest(
+  buildMethod: SitlBuildMethod | undefined,
+  requestedSanitizers: string[],
+): boolean {
+  if (!buildMethod) {
+    return false;
+  }
+  const wantsSanitizers = requestedSanitizers.length > 0;
+  if (wantsSanitizers) {
+    return SANITIZER_BUILD_METHODS.has(buildMethod);
+  }
+  return buildMethod === "px4_sitl_default";
+}
+
+export function normalizeSanitizersList(value: string[] | undefined): string[] {
+  if (!value || value.length === 0) {
+    return [];
+  }
+  return [...value].map((entry) => entry.trim().toLowerCase()).filter(Boolean).sort();
+}
+
+export function sanitizersListsEqual(a: string[] | undefined, b: string[] | undefined): boolean {
+  const left = normalizeSanitizersList(a);
+  const right = normalizeSanitizersList(b);
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((entry, index) => entry === right[index]);
+}
+
+export function resolveRequestedSanitizers(budget: Px4RuntimeReplayBudgetProfile): string[] {
+  return normalizeSanitizersList(budget.sanitizers_enabled);
 }
 
 async function readBuildManifest(config: Px4RuntimeReplayConfig): Promise<SitlBuildManifest | undefined> {
@@ -250,20 +329,35 @@ async function readBuildManifest(config: Px4RuntimeReplayConfig): Promise<SitlBu
   }
 }
 
-async function writeBuildManifest(config: Px4RuntimeReplayConfig, resolvedHash: string): Promise<void> {
+async function writeBuildManifest(
+  config: Px4RuntimeReplayConfig,
+  resolvedHash: string,
+  requestedSanitizers: string[],
+  buildMethod: SitlBuildMethod,
+  binaryPath: string,
+): Promise<void> {
   const manifest: SitlBuildManifest = {
     commit_hash: resolvedHash,
-    sitl_binary_relative: config.sitl_binary_relative,
-    binary_path: px4BinaryPath(config),
+    build_method: buildMethod,
+    sitl_binary_relative: sitlBinaryRelativeForBuildMethod(buildMethod),
+    binary_path: binaryPath,
     built_at: new Date().toISOString(),
+    sanitizers_enabled: normalizeSanitizersList(requestedSanitizers),
   };
   await writeFile(buildManifestPath(config), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 }
 
+function manifestSanitizersEnabled(manifest: SitlBuildManifest | undefined): string[] {
+  if (!manifest) {
+    return [];
+  }
+  return normalizeSanitizersList(manifest.sanitizers_enabled);
+}
+
 function manifestProvesBinary(
-  config: Px4RuntimeReplayConfig,
   manifest: SitlBuildManifest | undefined,
   resolvedHash: string,
+  requestedSanitizers: string[],
 ): boolean {
   if (!manifest) {
     return false;
@@ -271,10 +365,81 @@ function manifestProvesBinary(
   if (manifest.commit_hash.toLowerCase() !== resolvedHash.toLowerCase()) {
     return false;
   }
-  if (manifest.sitl_binary_relative !== config.sitl_binary_relative) {
+  if (!sanitizersListsEqual(manifestSanitizersEnabled(manifest), requestedSanitizers)) {
     return false;
   }
-  return existsSync(px4BinaryPath(config));
+  if (!buildMethodMatchesSanitizerRequest(manifest.build_method, requestedSanitizers)) {
+    return false;
+  }
+  return existsSync(manifest.binary_path);
+}
+
+async function runPx4SitlBuild(
+  root: string,
+  requestedSanitizers: string[],
+  budget: Px4RuntimeReplayBudgetProfile,
+  setupLog: string,
+  signal?: AbortSignal,
+): Promise<{ code: number; buildNote: string; buildMethod: SitlBuildMethod }> {
+  if (requestedSanitizers.length === 0) {
+    await appendFile(setupLog, `Starting make px4_sitl_default in ${root}\n`, "utf8");
+    const result = await runCommand("make", ["px4_sitl_default", "-j4"], {
+      cwd: root,
+      signal,
+      timeoutMs: budget.build_timeout_sec * 1000,
+      logPath: setupLog,
+    });
+    return { code: result.code, buildNote: "standard px4_sitl_default build", buildMethod: "px4_sitl_default" };
+  }
+
+  if (process.platform === "linux") {
+    await appendFile(setupLog, `Starting make px4_sitl_default_asan in ${root}\n`, "utf8");
+    const asanResult = await runCommand("make", ["px4_sitl_default_asan", "-j4"], {
+      cwd: root,
+      signal,
+      timeoutMs: budget.build_timeout_sec * 1000,
+      logPath: setupLog,
+    });
+    if (asanResult.code === 0) {
+      return {
+        code: 0,
+        buildNote: "PX4 sanitizer build via make px4_sitl_default_asan (ASan+UBSan)",
+        buildMethod: "px4_sitl_default_asan",
+      };
+    }
+    await appendFile(
+      setupLog,
+      `\npx4_sitl_default_asan failed (exit ${asanResult.code}); retrying px4_sitl_default with CMAKE sanitizer flags.\n`,
+      "utf8",
+    );
+  }
+
+  const sanitizerFlags = "-fsanitize=address,undefined";
+  await appendFile(
+    setupLog,
+    `Starting make px4_sitl_default with CMAKE sanitizer flags (${sanitizerFlags}) in ${root}\n`,
+    "utf8",
+  );
+  const fallback = await runCommand(
+    "make",
+    [
+      "px4_sitl_default",
+      "-j4",
+      `CMAKE_C_FLAGS_INIT=${sanitizerFlags}`,
+      `CMAKE_CXX_FLAGS_INIT=${sanitizerFlags}`,
+    ],
+    {
+      cwd: root,
+      signal,
+      timeoutMs: budget.build_timeout_sec * 1000,
+      logPath: setupLog,
+    },
+  );
+  return {
+    code: fallback.code,
+    buildNote: `px4_sitl_default with CMAKE_C/CXX_FLAGS_INIT=${sanitizerFlags}`,
+    buildMethod: "cmake_flags_asan",
+  };
 }
 
 function preflightBlocksRuntime(preflight: PreflightReport): { blocked: boolean; reason: string } {
@@ -599,6 +764,8 @@ async function writeEvidenceSummary(
   artifactDir: string,
   evidence: Px4RuntimeReplayEvidence,
 ): Promise<void> {
+  const sanitizerList =
+    evidence.sanitizers_used.length > 0 ? evidence.sanitizers_used.join(", ") : "(none)";
   const lines = [
     "# PX4 BATTERY_STATUS Runtime Replay Evidence Summary",
     "",
@@ -611,19 +778,28 @@ async function writeEvidenceSummary(
     `- target_commit: ${evidence.target_commit}`,
     `- resolved_commit_hash (target): ${evidence.resolved_commit_hash}`,
     `- firmware commit proven for executed binary: ${evidence.firmware_commit_proven}`,
+    `- sanitizers_used: ${sanitizerList}`,
+    evidence.build_method ? `- build_method: ${evidence.build_method}` : "",
+    evidence.build_method ? `- px4_binary_path: ${evidence.px4_binary_path}` : "",
     "",
     "## Observation",
     "",
     `- MAVLink connection: ${evidence.mavlink_connection}`,
     `- Crafted frame delivered: ${evidence.frame_delivered}`,
     `- PX4 binary present: ${evidence.px4_binary_present}`,
+    `- sanitizer_findings count: ${evidence.sanitizer_findings.length}`,
     `- Setup: ${evidence.setup_note}`,
     "",
-    "## Caveats",
-    "",
-    ...evidence.caveats.map((c) => `- ${c}`),
-    "",
   ];
+  if (evidence.sanitizer_findings.length > 0) {
+    lines.push(
+      "## Sanitizer instrumentation",
+      "",
+      "Runtime was classified as anomalous because AddressSanitizer/UndefinedBehaviorSanitizer reported findings in PX4 output after frame delivery. PX4 may not have exited; this is structural instrumentation evidence, not a crash-exit verdict, and not vulnerability discovery or a safety claim.",
+      "",
+    );
+  }
+  lines.push("## Caveats", "", ...evidence.caveats.map((c) => `- ${c}`), "");
   await writeFile(join(artifactDir, "evidence-summary.md"), lines.join("\n"), "utf8");
 }
 
@@ -643,6 +819,7 @@ async function writeEarlyUnavailableArtifacts(
   setupNote: string,
   targetCommit: string,
   resolvedHash: string,
+  sanitizersUsed: string[],
   options: { writePlaceholderRuntimeArtifacts: boolean },
 ): Promise<void> {
   if (options.writePlaceholderRuntimeArtifacts) {
@@ -678,6 +855,8 @@ async function writeEarlyUnavailableArtifacts(
     resolved_commit_hash: resolvedHash,
     frame_delivered: false,
     firmware_commit_proven: false,
+    sanitizers_used: sanitizersUsed,
+    sanitizer_findings: [],
     preflight,
     setup_note: setupNote,
   };
@@ -694,6 +873,9 @@ async function finalizeHarnessUnavailableEvidence(
   pymavlinkVersion: string,
   pythonVersion: string,
   mavlinkConnection: string,
+  sanitizersUsed: string[],
+  binaryPath: string,
+  buildMethod?: SitlBuildMethod,
 ): Promise<Px4RuntimeReplayEvidence> {
   await appendSetupSummary(artifactDir, setupNote);
   const evidence: Px4RuntimeReplayEvidence = {
@@ -704,16 +886,56 @@ async function finalizeHarnessUnavailableEvidence(
     python_version: pythonVersion,
     mavlink_connection: mavlinkConnection,
     px4_binary_present: true,
-    px4_binary_path: preflight.px4_binary_path,
+    px4_binary_path: binaryPath,
+    build_method: buildMethod,
     target_commit: targetCommit,
     resolved_commit_hash: resolvedHash,
     frame_delivered: false,
     firmware_commit_proven: true,
+    sanitizers_used: sanitizersUsed,
+    sanitizer_findings: [],
     preflight,
     setup_note: setupNote,
   };
   await writeEvidenceSummary(artifactDir, evidence);
   return evidence;
+}
+
+export async function readLocalBuildSanitizers(
+  config?: Px4RuntimeReplayConfig,
+): Promise<string[]> {
+  const cfg = config ?? (await loadPx4RuntimeReplayConfig());
+  const manifest = await readBuildManifest(cfg);
+  return manifestSanitizersEnabled(manifest);
+}
+
+export async function readLocalBuildMethod(
+  config?: Px4RuntimeReplayConfig,
+): Promise<SitlBuildMethod | undefined> {
+  const cfg = config ?? (await loadPx4RuntimeReplayConfig());
+  const manifest = await readBuildManifest(cfg);
+  return manifest?.build_method;
+}
+
+export async function readLocalBuildManifest(
+  config?: Px4RuntimeReplayConfig,
+): Promise<Px4SitlBuildManifest | undefined> {
+  const cfg = config ?? (await loadPx4RuntimeReplayConfig());
+  return readBuildManifest(cfg);
+}
+
+async function readObservationSanitizerFindings(artifactDir: string): Promise<SanitizerFinding[]> {
+  const observationPath = join(artifactDir, "observation-record.json");
+  if (!existsSync(observationPath)) {
+    return [];
+  }
+  try {
+    const raw = await readFile(observationPath, "utf8");
+    const record = JSON.parse(raw) as { sanitizer_findings?: SanitizerFinding[] };
+    return Array.isArray(record.sanitizer_findings) ? record.sanitizer_findings : [];
+  } catch {
+    return [];
+  }
 }
 
 function parseHarnessSummary(stdout: string): Px4RuntimeReplayHarnessSummary {
@@ -751,11 +973,18 @@ async function preparePx4AtCommit(
   config: Px4RuntimeReplayConfig,
   resolvedHash: string,
   budget: Px4RuntimeReplayBudgetProfile,
+  requestedSanitizers: string[],
   artifactDir: string,
   signal?: AbortSignal,
-): Promise<{ setupNote: string; built: boolean; firmwareCommitProven: boolean }> {
+): Promise<{
+  setupNote: string;
+  built: boolean;
+  firmwareCommitProven: boolean;
+  sanitizersUsed: string[];
+  binaryPath: string;
+  buildMethod?: SitlBuildMethod;
+}> {
   const root = px4Root(config);
-  const binary = px4BinaryPath(config);
   const setupLog = join(artifactDir, "px4-setup.log");
   const lines: string[] = [];
 
@@ -770,6 +999,8 @@ async function preparePx4AtCommit(
       setupNote: `PX4 commit fetch failed for ${resolvedHash}; see px4-setup.log.`,
       built: false,
       firmwareCommitProven: false,
+      sanitizersUsed: requestedSanitizers,
+      binaryPath: px4BinaryPath(config),
     };
   }
 
@@ -780,6 +1011,8 @@ async function preparePx4AtCommit(
       setupNote: lines.at(-1) ?? "PX4 repository not present.",
       built: false,
       firmwareCommitProven: false,
+      sanitizersUsed: requestedSanitizers,
+      binaryPath: px4BinaryPath(config),
     };
   }
 
@@ -800,28 +1033,51 @@ async function preparePx4AtCommit(
       setupNote: `PX4 checkout failed at ${resolvedHash}; see px4-setup.log.`,
       built: false,
       firmwareCommitProven: false,
+      sanitizersUsed: requestedSanitizers,
+      binaryPath: px4BinaryPath(config),
     };
   }
 
   const manifest = await readBuildManifest(config);
-  if (manifestProvesBinary(config, manifest, resolvedHash)) {
+  const manifestSanitizers = manifestSanitizersEnabled(manifest);
+  if (manifest && !sanitizersListsEqual(manifestSanitizers, requestedSanitizers)) {
     lines.push(
-      `Reused PX4 SITL binary at ${binary} with verified build manifest for ${resolvedHash} (built_at=${manifest?.built_at}).`,
+      `Build manifest sanitizers_enabled [${manifestSanitizers.join(", ") || "(none)"}] does not match requested [${requestedSanitizers.join(", ") || "(none)"}]; rebuild required.`,
+    );
+  } else if (
+    manifest &&
+    !buildMethodMatchesSanitizerRequest(manifest.build_method, requestedSanitizers)
+  ) {
+    lines.push(
+      `Build manifest build_method "${manifest.build_method}" does not match requested sanitizer configuration; rebuild required.`,
+    );
+  } else if (manifest && manifestProvesBinary(manifest, resolvedHash, requestedSanitizers)) {
+    const reusedBinary = manifest.binary_path;
+    lines.push(
+      `Reused PX4 SITL binary at ${reusedBinary} with verified build manifest for ${resolvedHash} (build_method=${manifest.build_method}, built_at=${manifest.built_at}, sanitizers=[${manifestSanitizers.join(", ") || "none"}]).`,
     );
     await writeFile(setupLog, `${lines.join("\n")}\n`, "utf8");
     return {
-      setupNote: lines.at(-1) ?? `Reused verified binary at ${binary}.`,
+      setupNote: lines.at(-1) ?? `Reused verified binary at ${reusedBinary}.`,
       built: false,
       firmwareCommitProven: true,
+      sanitizersUsed: manifestSanitizers,
+      binaryPath: reusedBinary,
+      buildMethod: manifest.build_method,
     };
   }
 
-  if (existsSync(binary)) {
+  const defaultBinary = px4BinaryPath(config);
+  if (manifest?.binary_path && existsSync(manifest.binary_path)) {
     lines.push(
-      `PX4 SITL binary exists at ${binary} but no build manifest proves it was built from ${resolvedHash}; treated as unverified.`,
+      `PX4 SITL binary exists at ${manifest.binary_path} but manifest does not prove commit/sanitizer/build_method match for this request; treated as unverified.`,
+    );
+  } else if (existsSync(defaultBinary)) {
+    lines.push(
+      `PX4 SITL binary exists at ${defaultBinary} but no build manifest proves it was built from ${resolvedHash} with matching sanitizers and build method; treated as unverified.`,
     );
   } else {
-    lines.push(`No PX4 SITL binary at ${binary} for ${resolvedHash}.`);
+    lines.push(`No verified PX4 SITL binary for ${resolvedHash} with requested build configuration.`);
   }
 
   if (!budget.attempt_build) {
@@ -833,40 +1089,60 @@ async function preparePx4AtCommit(
       setupNote: lines.at(-1) ?? "Build skipped; binary provenance unverified.",
       built: false,
       firmwareCommitProven: false,
+      sanitizersUsed: requestedSanitizers,
+      binaryPath: defaultBinary,
     };
   }
 
-  await writeFile(setupLog, `${lines.join("\n")}\nStarting make px4_sitl_default in ${root}\n`, "utf8");
-  const buildResult = await runCommand("make", ["px4_sitl_default", "-j4"], {
-    cwd: root,
+  await writeFile(setupLog, `${lines.join("\n")}\n`, "utf8");
+  const { code: buildCode, buildNote, buildMethod } = await runPx4SitlBuild(
+    root,
+    requestedSanitizers,
+    budget,
+    setupLog,
     signal,
-    timeoutMs: budget.build_timeout_sec * 1000,
-    logPath: setupLog,
-  });
-  if (buildResult.code !== 0) {
+  );
+  lines.push(buildNote);
+  const builtBinaryPath = binaryPathForBuildMethod(config, buildMethod);
+  if (buildCode !== 0) {
+    await appendFile(setupLog, `\nPX4 build failed (exit ${buildCode}).\n`, "utf8");
     return {
-      setupNote: `PX4 build failed at ${resolvedHash} (exit ${buildResult.code}). See px4-setup.log.`,
+      setupNote: `PX4 build failed at ${resolvedHash} (exit ${buildCode}). See px4-setup.log.`,
       built: false,
       firmwareCommitProven: false,
+      sanitizersUsed: requestedSanitizers,
+      binaryPath: builtBinaryPath,
     };
   }
-  if (!existsSync(binary)) {
+  if (!existsSync(builtBinaryPath)) {
     return {
-      setupNote: `PX4 build finished at ${resolvedHash} but binary still missing at ${binary}.`,
+      setupNote: `PX4 build (${buildMethod}) finished at ${resolvedHash} but binary still missing at ${builtBinaryPath}.`,
       built: false,
       firmwareCommitProven: false,
+      sanitizersUsed: requestedSanitizers,
+      binaryPath: builtBinaryPath,
+      buildMethod,
     };
   }
-  await writeBuildManifest(config, resolvedHash);
+  await writeBuildManifest(
+    config,
+    resolvedHash,
+    requestedSanitizers,
+    buildMethod,
+    builtBinaryPath,
+  );
   await appendFile(
     setupLog,
-    `\nRecorded build manifest at ${buildManifestPath(config)} for ${resolvedHash}.\n`,
+    `\nRecorded build manifest at ${buildManifestPath(config)} for ${resolvedHash} (build_method=${buildMethod}, binary=${builtBinaryPath}, sanitizers=[${requestedSanitizers.join(", ") || "none"}]).\n`,
     "utf8",
   );
   return {
-    setupNote: `Built PX4 SITL binary at ${binary} for commit ${resolvedHash} and recorded build manifest.`,
+    setupNote: `Built PX4 SITL binary at ${builtBinaryPath} via ${buildMethod} for commit ${resolvedHash} and recorded build manifest (sanitizers=[${requestedSanitizers.join(", ") || "none"}]).`,
     built: true,
     firmwareCommitProven: true,
+    sanitizersUsed: requestedSanitizers,
+    binaryPath: builtBinaryPath,
+    buildMethod,
   };
 }
 
@@ -896,6 +1172,7 @@ export async function producePx4RuntimeReplayEvidence(
   }
 
   const budget = resolveBudgetProfile(config, options.budget_profile);
+  const requestedSanitizers = resolveRequestedSanitizers(budget);
   const progress = options.onProgress;
 
   await mkdir(options.artifact_dir, { recursive: true });
@@ -915,6 +1192,7 @@ export async function producePx4RuntimeReplayEvidence(
       "Preflight blocked before PX4 setup.",
       options.target_commit,
       resolvedHash,
+      requestedSanitizers,
       { writePlaceholderRuntimeArtifacts: true },
     );
     return {
@@ -932,6 +1210,8 @@ export async function producePx4RuntimeReplayEvidence(
         resolved_commit_hash: resolvedHash,
         frame_delivered: false,
         firmware_commit_proven: false,
+        sanitizers_used: requestedSanitizers,
+        sanitizer_findings: [],
         preflight,
         setup_note: "Preflight blocked before PX4 setup.",
       },
@@ -952,6 +1232,7 @@ export async function producePx4RuntimeReplayEvidence(
       "Preflight blocked at pymavlink venv preparation.",
       options.target_commit,
       resolvedHash,
+      requestedSanitizers,
       { writePlaceholderRuntimeArtifacts: true },
     );
     return {
@@ -969,6 +1250,8 @@ export async function producePx4RuntimeReplayEvidence(
         resolved_commit_hash: resolvedHash,
         frame_delivered: false,
         firmware_commit_proven: false,
+        sanitizers_used: requestedSanitizers,
+        sanitizer_findings: [],
         preflight,
         setup_note: "Preflight blocked at pymavlink venv preparation.",
       },
@@ -1004,6 +1287,7 @@ export async function producePx4RuntimeReplayEvidence(
       "Frame preparation failed after preflight.",
       options.target_commit,
       resolvedHash,
+      requestedSanitizers,
       { writePlaceholderRuntimeArtifacts: false },
     );
     return {
@@ -1021,6 +1305,8 @@ export async function producePx4RuntimeReplayEvidence(
         resolved_commit_hash: resolvedHash,
         frame_delivered: false,
         firmware_commit_proven: false,
+        sanitizers_used: requestedSanitizers,
+        sanitizer_findings: [],
         preflight,
         setup_note: "Frame preparation failed after preflight.",
       },
@@ -1028,17 +1314,19 @@ export async function producePx4RuntimeReplayEvidence(
   }
 
   await progress?.("px4-setup", 40, "Fetching commit, checking out PX4, and building SITL when allowed.");
-  const { setupNote, firmwareCommitProven } = await preparePx4AtCommit(
-    config,
-    resolvedHash,
-    budget,
-    options.artifact_dir,
-    options.signal,
-  );
+  const { setupNote, firmwareCommitProven, sanitizersUsed, binaryPath, buildMethod } =
+    await preparePx4AtCommit(
+      config,
+      resolvedHash,
+      budget,
+      requestedSanitizers,
+      options.artifact_dir,
+      options.signal,
+    );
   await appendSetupSummary(options.artifact_dir, setupNote);
 
-  if (!firmwareCommitProven || !existsSync(px4BinaryPath(config))) {
-    const reason = runtimeUnavailableAfterSetup(budget, setupNote, existsSync(px4BinaryPath(config)));
+  if (!firmwareCommitProven || !existsSync(binaryPath)) {
+    const reason = runtimeUnavailableAfterSetup(budget, setupNote, existsSync(binaryPath));
     await writeEarlyUnavailableArtifacts(
       options.artifact_dir,
       preflight,
@@ -1046,6 +1334,7 @@ export async function producePx4RuntimeReplayEvidence(
       setupNote,
       options.target_commit,
       resolvedHash,
+      sanitizersUsed,
       { writePlaceholderRuntimeArtifacts: true },
     );
     return {
@@ -1057,12 +1346,15 @@ export async function producePx4RuntimeReplayEvidence(
         pymavlink_version: config.pymavlink_version,
         python_version: "unknown",
         mavlink_connection: config.mavlink_connection,
-        px4_binary_present: existsSync(px4BinaryPath(config)),
-        px4_binary_path: preflight.px4_binary_path,
+        px4_binary_present: existsSync(binaryPath),
+        px4_binary_path: binaryPath,
+        build_method: buildMethod,
         target_commit: options.target_commit,
         resolved_commit_hash: resolvedHash,
         frame_delivered: false,
         firmware_commit_proven: false,
+        sanitizers_used: sanitizersUsed,
+        sanitizer_findings: [],
         preflight,
         setup_note: setupNote,
       },
@@ -1083,7 +1375,7 @@ export async function producePx4RuntimeReplayEvidence(
     "--px4-root",
     px4Root(config),
     "--px4-binary",
-    px4BinaryPath(config),
+    binaryPath,
     "--mavlink-connection",
     config.mavlink_connection,
     "--replay-timeout-sec",
@@ -1177,33 +1469,45 @@ export async function producePx4RuntimeReplayEvidence(
       pymavlinkVersion,
       pythonVersion,
       config.mavlink_connection,
+      sanitizersUsed,
+      binaryPath,
+      buildMethod,
     );
     return { kind: "evidence", evidence };
   }
 
   const frameDelivered = summary.frame_delivered === true;
+  const sanitizerFindings =
+    summary.sanitizer_findings ?? (await readObservationSanitizerFindings(options.artifact_dir));
+  const resolvedOutcome =
+    sanitizerFindings.length > 0 ? "runtime_anomalous" : outcome;
   const evidenceSummary =
-    outcome === "runtime_clean"
-      ? `PX4 SITL runtime replay delivered the crafted BATTERY_STATUS frame using firmware with verified build manifest for ${resolvedHash}; PX4 remained running with no abnormal log markers.`
-      : outcome === "runtime_anomalous"
-        ? `PX4 SITL runtime replay observed unexpected behavior after frame delivery against verified firmware for ${resolvedHash}: ${summary.error ?? "see observation-record.json and runtime.log"}.`
-        : outcome === "runtime_unavailable"
-          ? summary.error ?? "Runtime unavailable before or during frame delivery."
-          : `PX4 runtime replay finished with outcome ${outcome}.`;
+    resolvedOutcome === "runtime_clean"
+      ? `PX4 SITL runtime replay delivered the crafted BATTERY_STATUS frame using firmware with verified build manifest for ${resolvedHash}; PX4 remained running with no abnormal log markers or sanitizer findings.`
+      : resolvedOutcome === "runtime_anomalous" && sanitizerFindings.length > 0
+        ? `PX4 SITL runtime replay reported AddressSanitizer/UndefinedBehaviorSanitizer findings after frame delivery against verified firmware for ${resolvedHash}. PX4 may still be running; this is structural instrumentation evidence surfaced by ASan/UBSan, not a crash-exit verdict. ${summary.error ?? "See observation-record.json and runtime.log."}`
+        : resolvedOutcome === "runtime_anomalous"
+          ? `PX4 SITL runtime replay observed unexpected behavior after frame delivery against verified firmware for ${resolvedHash}: ${summary.error ?? "see observation-record.json and runtime.log"}.`
+          : resolvedOutcome === "runtime_unavailable"
+            ? summary.error ?? "Runtime unavailable before or during frame delivery."
+            : `PX4 runtime replay finished with outcome ${resolvedOutcome}.`;
 
   const evidence: Px4RuntimeReplayEvidence = {
-    outcome,
+    outcome: resolvedOutcome,
     summary: evidenceSummary,
     caveats: RUNTIME_REPLAY_CAVEATS,
     pymavlink_version: pymavlinkVersion,
     python_version: pythonVersion,
     mavlink_connection: summary.mavlink_connection ?? config.mavlink_connection,
     px4_binary_present: true,
-    px4_binary_path: preflight.px4_binary_path,
+    px4_binary_path: binaryPath,
+    build_method: buildMethod,
     target_commit: options.target_commit,
     resolved_commit_hash: resolvedHash,
     frame_delivered: frameDelivered,
     firmware_commit_proven: true,
+    sanitizers_used: sanitizersUsed,
+    sanitizer_findings: sanitizerFindings,
     preflight,
     setup_note: setupNote,
   };

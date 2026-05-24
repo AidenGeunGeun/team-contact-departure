@@ -75,12 +75,14 @@ function renderCondition(label, value) {
 function renderConditions(pair) {
   pairConditions.replaceChildren();
   pairConditions.append(
-    renderCondition("Outcomes differ", pair.outcomes_differ),
-    renderCondition("Frame bytes equal", pair.frame_bytes_equal),
+    renderCondition("Roles correctly assigned", pair.roles_correctly_assigned),
     renderCondition("Provenance complete", pair.provenance_complete),
-    renderCondition("Budget profile equal", pair.budget_profile_equal),
     renderCondition("Frames delivered on both sides", pair.frames_delivered_on_both_sides),
     renderCondition("Meaningful outcomes on both sides", pair.meaningful_outcomes_on_both_sides),
+    renderCondition("Outcomes differ", pair.outcomes_differ),
+    renderCondition("Frame bytes equal", pair.frame_bytes_equal),
+    renderCondition("Budget profile equal", pair.budget_profile_equal),
+    renderCondition("Sanitizers used equal", pair.sanitizers_used_equal),
   );
 }
 

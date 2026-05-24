@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -35,6 +36,12 @@ CAVEATS = [
     "This does not prove that runtime_anomalous means a vulnerability was found.",
 ]
 
+SANITIZER_LINE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"==ERROR:\s*AddressSanitizer:"), "asan"),
+    (re.compile(r"==ERROR:\s*UndefinedBehaviorSanitizer:"), "ubsan"),
+    (re.compile(r"\bruntime error:\s", re.IGNORECASE), "ubsan"),
+]
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -49,6 +56,40 @@ def truncate_log(text: str, limit: int = 120_000) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n... truncated ({len(text) - limit} bytes omitted)\n"
+
+
+def parse_sanitizer_findings(log_text: str) -> list[dict[str, Any]]:
+    """Extract structured ASan/UBSan findings from PX4 combined stdout/stderr."""
+    findings: list[dict[str, Any]] = []
+    seen_messages: set[str] = set()
+    lines = log_text.splitlines()
+    for index, line in enumerate(lines):
+        for pattern, kind in SANITIZER_LINE_PATTERNS:
+            if not pattern.search(line):
+                continue
+            message = line.strip()
+            if message in seen_messages:
+                break
+            seen_messages.add(message)
+            context_start = max(0, index - 1)
+            context_end = min(len(lines), index + 4)
+            context = "\n".join(lines[context_start:context_end])
+            source_location: str | None = None
+            for context_line in lines[index : index + 6]:
+                location_match = re.search(r"(\S+:\d+:\d+)", context_line)
+                if location_match:
+                    source_location = location_match.group(1)
+                    break
+            entry: dict[str, Any] = {
+                "kind": kind,
+                "message": message,
+                "context": truncate_log(context, 2000),
+            }
+            if source_location:
+                entry["source_location"] = source_location
+            findings.append(entry)
+            break
+    return findings
 
 
 def build_bounds_test_battery_status(mav: dialect.MAVLink) -> tuple[bytes, dict[str, Any]]:
@@ -155,13 +196,13 @@ def observe_runtime(
     log_tail = runtime_log.read_text(encoding="utf-8", errors="replace") if runtime_log.exists() else ""
     abnormal_markers = [
         "segmentation fault",
-        "sanitizer",
         "stack trace",
         "fatal",
         "assertion failed",
     ]
     log_lower = log_tail.lower()
     markers = [marker for marker in abnormal_markers if marker in log_lower]
+    sanitizer_findings = parse_sanitizer_findings(log_tail)
     px4_still_running = exit_code is None
     return {
         "observation_window_sec": observation_sec,
@@ -169,6 +210,7 @@ def observe_runtime(
         "px4_still_running": px4_still_running,
         "px4_exit_code": exit_code,
         "runtime_log_markers": markers,
+        "sanitizer_findings": sanitizer_findings,
         "runtime_log_excerpt": truncate_log(log_tail, 6000),
     }
 
@@ -299,10 +341,12 @@ def main() -> int:
         observation["delivery_at"] = delivery.get("sent_at")
         write_text(artifact_dir / "observation-record.json", json.dumps(observation, indent=2) + "\n")
 
+        sanitizer_findings = observation.get("sanitizer_findings") or []
         anomalous = (
             not observation.get("px4_still_running")
             or observation.get("px4_exit_code") not in (None, 0)
             or len(observation.get("runtime_log_markers") or []) > 0
+            or len(sanitizer_findings) > 0
         )
         outcome = "runtime_anomalous" if anomalous else "runtime_clean"
         summary = {
@@ -316,11 +360,19 @@ def main() -> int:
             "frame_hex_length": len(frame_record["frame_hex"]),
             "started_at": started_at,
             "finished_at": utc_now(),
+            "sanitizer_findings": sanitizer_findings,
         }
         if anomalous:
-            summary["error"] = (
-                "PX4 exited or logged abnormal markers after the crafted frame was delivered."
-            )
+            if len(sanitizer_findings) > 0:
+                summary["error"] = (
+                    "AddressSanitizer/UndefinedBehaviorSanitizer reported findings after the crafted "
+                    "frame was delivered; PX4 may still be running. This is structural instrumentation "
+                    "evidence, not a crash-exit verdict."
+                )
+            else:
+                summary["error"] = (
+                    "PX4 exited or logged abnormal markers after the crafted frame was delivered."
+                )
         summary["frame_delivered"] = True
         print(json.dumps(summary))
         return 0

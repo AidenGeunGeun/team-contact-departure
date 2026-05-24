@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   loadPx4RuntimeReplayConfig,
+  normalizeSanitizersList,
   producePx4RuntimeReplayEvidence,
+  readLocalBuildManifest,
+  readLocalBuildSanitizers,
+  sanitizersListsEqual,
+  type SitlBuildMethod,
 } from "../domain/px4-runtime-replay.js";
 import { buildFullReplayOutcome, buildPartialReplayOutcome } from "./report.js";
 import type { BundleManifest, ReplayOutcome } from "./types.js";
@@ -29,7 +34,34 @@ function sha256Hex(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function pinnedBuildMethod(manifest: BundleManifest): SitlBuildMethod | undefined {
+  const value = manifest.pinned_inputs.build_method;
+  return typeof value === "string" && value.length > 0 ? (value as SitlBuildMethod) : undefined;
+}
+
 export async function replayPx4RuntimeReplay(bundleDir: string, manifest: BundleManifest): Promise<ReplayOutcome> {
+  const config = await loadPx4RuntimeReplayConfig();
+  const pinnedSanitizers = normalizeSanitizersList(
+    Array.isArray(manifest.pinned_inputs.sanitizers_used)
+      ? (manifest.pinned_inputs.sanitizers_used as string[])
+      : undefined,
+  );
+  const localSanitizers = await readLocalBuildSanitizers(config);
+  if (!sanitizersListsEqual(pinnedSanitizers, localSanitizers)) {
+    throw new Error(
+      `Replay refused: sanitizer configuration mismatch (pinned [${pinnedSanitizers.join(", ") || "none"}] vs local [${localSanitizers.join(", ") || "none"}]).`,
+    );
+  }
+
+  const expectedBuildMethod = pinnedBuildMethod(manifest);
+  const localManifest = await readLocalBuildManifest(config);
+  const localBuildMethod = localManifest?.build_method;
+  if (expectedBuildMethod && localBuildMethod !== expectedBuildMethod) {
+    throw new Error(
+      `Replay refused: build method mismatch (pinned ${expectedBuildMethod} vs local ${localBuildMethod ?? "none"}).`,
+    );
+  }
+
   await verifyArtifacts(bundleDir);
 
   const frameRecord = JSON.parse(
@@ -45,26 +77,35 @@ export async function replayPx4RuntimeReplay(bundleDir: string, manifest: Bundle
     throw new Error(`Frame bytes hash mismatch (expected ${pinnedHash}, got ${frameHash}).`);
   }
 
-  const config = await loadPx4RuntimeReplayConfig();
   const resolvedHash = String(manifest.pinned_inputs.px4_commit_hash ?? "").toLowerCase();
   const buildManifestPath = join(
     REPO_ROOT,
     config.px4_cache_dir,
     config.build_manifest_filename ?? ".contact-departure-sitl-build.json",
   );
-  const sitlBinaryPath = join(REPO_ROOT, config.px4_cache_dir, config.sitl_binary_relative);
 
   let buildManifestCommit: string | undefined;
-  if (existsSync(buildManifestPath)) {
-    const buildManifest = JSON.parse(await readFile(buildManifestPath, "utf8")) as { commit_hash?: string };
-    buildManifestCommit = buildManifest.commit_hash?.toLowerCase();
+  let verifiedBinaryPath: string | undefined;
+  if (existsSync(buildManifestPath) && localManifest) {
+    buildManifestCommit = localManifest.commit_hash?.toLowerCase();
+    if (
+      buildManifestCommit === resolvedHash &&
+      sanitizersListsEqual(localManifest.sanitizers_enabled, pinnedSanitizers) &&
+      (!expectedBuildMethod || localManifest.build_method === expectedBuildMethod)
+    ) {
+      verifiedBinaryPath = localManifest.binary_path;
+    } else {
+      buildManifestCommit = undefined;
+    }
   }
 
   const canFullReplay =
     Boolean(resolvedHash) &&
     Boolean(buildManifestCommit) &&
     buildManifestCommit === resolvedHash &&
-    existsSync(sitlBinaryPath);
+    typeof verifiedBinaryPath === "string" &&
+    existsSync(verifiedBinaryPath) &&
+    sanitizersListsEqual(pinnedSanitizers, localSanitizers);
 
   if (canFullReplay) {
     const outcome = await producePx4RuntimeReplayEvidence({

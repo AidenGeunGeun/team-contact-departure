@@ -123,6 +123,15 @@ export interface Px4RuntimeReplayResultMetadata {
   firmware_commit_proven: boolean;
   px4_binary_present: boolean;
   budget_profile: string;
+  build_method?: string;
+  binary_path?: string;
+  sanitizers_used: string[];
+  sanitizer_findings?: Array<{
+    kind: string;
+    message: string;
+    source_location?: string;
+    context?: string;
+  }>;
 }
 
 export interface Px4SitlProbeResultMetadata {
@@ -1604,6 +1613,8 @@ async function buildPx4RuntimeReplayResult(
         firmware_commit_proven: false,
         px4_binary_present: false,
         budget_profile: budgetProfile,
+        sanitizers_used: [],
+        sanitizer_findings: [],
       },
     };
   }
@@ -1680,6 +1691,10 @@ async function buildPx4RuntimeReplayResult(
       firmware_commit_proven: evidence.firmware_commit_proven,
       px4_binary_present: evidence.px4_binary_present,
       budget_profile: budgetProfile,
+      build_method: evidence.build_method,
+      binary_path: evidence.px4_binary_path,
+      sanitizers_used: evidence.sanitizers_used,
+      sanitizer_findings: evidence.sanitizer_findings,
     },
   };
 }

@@ -51,6 +51,9 @@ interface SyntheticReplayJobInput {
   frame_delivered: boolean;
   firmware_commit_proven: boolean;
   frame_hex: string;
+  sanitizers_used?: string[];
+  build_method?: string;
+  binary_path?: string;
 }
 
 async function writeSyntheticReplayJob(input: SyntheticReplayJobInput): Promise<void> {
@@ -104,6 +107,11 @@ async function writeSyntheticReplayJob(input: SyntheticReplayJobInput): Promise<
     "utf8",
   );
   await writeFile(
+    join(artifactDir, "evidence-summary.md"),
+    `# Synthetic replay job\n\nOutcome: ${input.outcome}\n`,
+    "utf8",
+  );
+  await writeFile(
     join(runDir, "result.json"),
     `${JSON.stringify(
       {
@@ -129,6 +137,10 @@ async function writeSyntheticReplayJob(input: SyntheticReplayJobInput): Promise<
           mavlink_connection: "udp:127.0.0.1:14540",
           px4_binary_present: true,
           budget_profile: input.budget_profile,
+          sanitizers_used: input.sanitizers_used ?? [],
+          sanitizer_findings: [],
+          build_method: input.build_method,
+          binary_path: input.binary_path,
         },
       },
       null,
@@ -910,9 +922,127 @@ const syntheticTruePair = await runCompareEvidencePair({
   job_id_b: syntheticPostJobId,
 });
 assert.equal(syntheticTruePair.details.pair.verdict_flip_demonstrated, true);
+assert.equal(syntheticTruePair.details.pair.roles_correctly_assigned, true);
+assert.equal(syntheticTruePair.details.pair.sanitizers_used_equal, true);
 assert.equal(syntheticTruePair.details.pair.frames_delivered_on_both_sides, true);
 assert.equal(syntheticTruePair.details.pair.meaningful_outcomes_on_both_sides, true);
 assert.equal(syntheticTruePair.details.pair.outcomes_differ, true);
+
+const syntheticAsanPreJobId = "job-smoke-synthetic-asan-pre";
+const syntheticAsanPostJobId = "job-smoke-synthetic-asan-post";
+const syntheticMixedSanitizerPostJobId = "job-smoke-synthetic-post-no-san";
+
+await writeSyntheticReplayJob({
+  job_id: syntheticAsanPreJobId,
+  case_id: "mavlink-battery-status-runtime-replay",
+  test_card_id: "px4-runtime-replay",
+  target_commit: "mavlink-battery-status-bounds-pre",
+  budget_profile: "asan-default",
+  resolved_commit_hash: prePatchCommitHash,
+  outcome: "runtime_anomalous",
+  frame_delivered: true,
+  firmware_commit_proven: true,
+  frame_hex: syntheticFrameHex,
+  sanitizers_used: ["asan", "ubsan"],
+});
+await writeSyntheticReplayJob({
+  job_id: syntheticAsanPostJobId,
+  case_id: "mavlink-battery-status-runtime-replay",
+  test_card_id: "px4-runtime-replay",
+  target_commit: "mavlink-battery-status-bounds-post",
+  budget_profile: "asan-default",
+  resolved_commit_hash: postPatchCommitHash,
+  outcome: "runtime_clean",
+  frame_delivered: true,
+  firmware_commit_proven: true,
+  frame_hex: syntheticFrameHex,
+  sanitizers_used: ["asan", "ubsan"],
+});
+await writeSyntheticReplayJob({
+  job_id: syntheticMixedSanitizerPostJobId,
+  case_id: "mavlink-battery-status-runtime-replay",
+  test_card_id: "px4-runtime-replay",
+  target_commit: "mavlink-battery-status-bounds-post",
+  budget_profile: "smoke-fast",
+  resolved_commit_hash: postPatchCommitHash,
+  outcome: "runtime_clean",
+  frame_delivered: true,
+  firmware_commit_proven: true,
+  frame_hex: syntheticFrameHex,
+  sanitizers_used: ["asan", "ubsan"],
+});
+
+const syntheticAsanTruePair = await runCompareEvidencePair({
+  job_id_a: syntheticAsanPreJobId,
+  job_id_b: syntheticAsanPostJobId,
+});
+assert.equal(syntheticAsanTruePair.details.pair.verdict_flip_demonstrated, true);
+assert.equal(syntheticAsanTruePair.details.pair.sanitizers_used_equal, true);
+
+let mixedSanitizerPairRefused = false;
+try {
+  await runCompareEvidencePair({
+    job_id_a: syntheticPreJobId,
+    job_id_b: syntheticMixedSanitizerPostJobId,
+  });
+} catch (error) {
+  mixedSanitizerPairRefused = true;
+  const message = error instanceof Error ? error.message : String(error);
+  assert.match(message.toLowerCase(), /sanitizers_used/);
+}
+assert.equal(
+  mixedSanitizerPairRefused,
+  true,
+  "compare_evidence_pair must refuse pairs with mismatched sanitizers_used",
+);
+
+const syntheticBuildMethodPreJobId = "job-smoke-synthetic-buildmethod-pre";
+const syntheticBuildMethodPostJobId = "job-smoke-synthetic-buildmethod-post";
+const px4CacheRoot = join(repoRoot, ".cache", "px4");
+const asanBinaryPath = join(px4CacheRoot, "build/px4_sitl_default_asan/bin/px4");
+const cmakeBinaryPath = join(px4CacheRoot, "build/px4_sitl_default/bin/px4");
+
+await writeSyntheticReplayJob({
+  job_id: syntheticBuildMethodPreJobId,
+  case_id: "mavlink-battery-status-runtime-replay",
+  test_card_id: "px4-runtime-replay",
+  target_commit: "mavlink-battery-status-bounds-pre",
+  budget_profile: "asan-default",
+  resolved_commit_hash: prePatchCommitHash,
+  outcome: "runtime_anomalous",
+  frame_delivered: true,
+  firmware_commit_proven: true,
+  frame_hex: syntheticFrameHex,
+  sanitizers_used: ["asan", "ubsan"],
+  build_method: "px4_sitl_default_asan",
+  binary_path: asanBinaryPath,
+});
+await writeSyntheticReplayJob({
+  job_id: syntheticBuildMethodPostJobId,
+  case_id: "mavlink-battery-status-runtime-replay",
+  test_card_id: "px4-runtime-replay",
+  target_commit: "mavlink-battery-status-bounds-post",
+  budget_profile: "asan-default",
+  resolved_commit_hash: postPatchCommitHash,
+  outcome: "runtime_clean",
+  frame_delivered: true,
+  firmware_commit_proven: true,
+  frame_hex: syntheticFrameHex,
+  sanitizers_used: ["asan", "ubsan"],
+  build_method: "cmake_flags_asan",
+  binary_path: cmakeBinaryPath,
+});
+
+const mixedBuildMethodPair = await runCompareEvidencePair({
+  job_id_a: syntheticBuildMethodPreJobId,
+  job_id_b: syntheticBuildMethodPostJobId,
+});
+assert.equal(
+  mixedBuildMethodPair.details.pair.verdict_flip_demonstrated,
+  true,
+  "pair tool compares sanitizers only; differing build_method across jobs does not block pair storage",
+);
+assert.equal(mixedBuildMethodPair.details.pair.sanitizers_used_equal, true);
 
 // ---- Replayable evidence bundles -------------------------------------------
 
@@ -1044,6 +1174,89 @@ if (staticBundlePath) {
     "static hash mismatch must report pinned hash failure",
   );
   await writeFileAsync(staticManifestPath, staticManifestOriginal, "utf8");
+}
+
+let runtimeReplaySanitizerMismatchReplayFailed = false;
+let runtimeReplaySanitizerMismatchNote: string | undefined;
+try {
+  const runtimeReplayBundle = await runCreateEvidenceBundle({ job_id: syntheticPostJobId });
+  const runtimeManifestPath = join(repoRoot, runtimeReplayBundle.details.bundle_path, "manifest.json");
+  const runtimeManifestOriginal = readFileSync(runtimeManifestPath, "utf8");
+  const runtimeManifest = JSON.parse(runtimeManifestOriginal) as {
+    pinned_inputs: { sanitizers_used?: string[] };
+  };
+  runtimeManifest.pinned_inputs.sanitizers_used = ["asan", "ubsan"];
+  await writeFileAsync(runtimeManifestPath, `${JSON.stringify(runtimeManifest, null, 2)}\n`, "utf8");
+  const sanitizerMismatchReplay = runReplayCli(runtimeReplayBundle.details.bundle_path);
+  runtimeReplaySanitizerMismatchReplayFailed = sanitizerMismatchReplay.status !== 0;
+  assert.equal(
+    runtimeReplaySanitizerMismatchReplayFailed,
+    true,
+    "runtime replay bundle with mismatched sanitizers_used pinning must FAIL",
+  );
+  assert.match(
+    sanitizerMismatchReplay.stdout + sanitizerMismatchReplay.stderr,
+    /sanitizer configuration mismatch|sanitizers_used|replay refused/i,
+    "sanitizer mismatch replay must name both sanitizer lists",
+  );
+  runtimeReplaySanitizerMismatchNote = "runtime-replay sanitizer mismatch replay FAIL";
+  await writeFileAsync(runtimeManifestPath, runtimeManifestOriginal, "utf8");
+} catch (error) {
+  runtimeReplaySanitizerMismatchNote = `runtime-replay sanitizer mismatch skipped: ${error instanceof Error ? error.message : String(error)}`;
+}
+
+let runtimeReplayBuildMethodMismatchReplayFailed = false;
+let runtimeReplayBuildMethodMismatchNote: string | undefined;
+try {
+  const buildMethodBundle = await runCreateEvidenceBundle({ job_id: syntheticBuildMethodPreJobId });
+  const buildMethodManifestPath = join(repoRoot, buildMethodBundle.details.bundle_path, "manifest.json");
+  const buildMethodManifestOriginal = readFileSync(buildMethodManifestPath, "utf8");
+  const buildMethodManifest = JSON.parse(buildMethodManifestOriginal) as {
+    pinned_inputs: { build_method?: string; sanitizers_used?: string[]; px4_commit_hash?: string };
+  };
+  await mkdir(px4CacheRoot, { recursive: true });
+  const localBuildManifestPath = join(px4CacheRoot, ".contact-departure-sitl-build.json");
+  const localBuildManifestOriginal = existsSync(localBuildManifestPath)
+    ? readFileSync(localBuildManifestPath, "utf8")
+    : undefined;
+  await writeFile(
+    localBuildManifestPath,
+    `${JSON.stringify(
+      {
+        commit_hash: buildMethodManifest.pinned_inputs.px4_commit_hash ?? prePatchCommitHash,
+        build_method: "cmake_flags_default",
+        sitl_binary_relative: "build/px4_sitl_default/bin/px4",
+        binary_path: cmakeBinaryPath,
+        built_at: new Date().toISOString(),
+        sanitizers_enabled: buildMethodManifest.pinned_inputs.sanitizers_used ?? ["asan", "ubsan"],
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  const buildMethodMismatchReplay = runReplayCli(buildMethodBundle.details.bundle_path);
+  runtimeReplayBuildMethodMismatchReplayFailed = buildMethodMismatchReplay.status !== 0;
+  assert.equal(
+    runtimeReplayBuildMethodMismatchReplayFailed,
+    true,
+    "runtime replay bundle with mismatched build_method pinning must FAIL",
+  );
+  assert.match(
+    buildMethodMismatchReplay.stdout + buildMethodMismatchReplay.stderr,
+    /build method mismatch|px4_sitl_default_asan|cmake_flags_default|replay refused/i,
+    "build_method mismatch replay must name both methods",
+  );
+  runtimeReplayBuildMethodMismatchNote = "runtime-replay build_method mismatch replay FAIL";
+  if (localBuildManifestOriginal !== undefined) {
+    await writeFileAsync(localBuildManifestPath, localBuildManifestOriginal, "utf8");
+  } else if (existsSync(localBuildManifestPath)) {
+    const { unlink } = await import("node:fs/promises");
+    await unlink(localBuildManifestPath);
+  }
+  await writeFileAsync(buildMethodManifestPath, buildMethodManifestOriginal, "utf8");
+} catch (error) {
+  runtimeReplayBuildMethodMismatchNote = `runtime-replay build_method mismatch skipped: ${error instanceof Error ? error.message : String(error)}`;
 }
 
 let pairFrameTamperReplayFailed = false;
@@ -1180,6 +1393,10 @@ try {
           pair_bundle: pairBundle.details.bundle_id,
           pair_replay_pass: true,
           pair_frame_tamper_replay_failed: pairFrameTamperReplayFailed,
+          runtime_replay_sanitizer_mismatch_replay_failed: runtimeReplaySanitizerMismatchReplayFailed,
+          runtime_replay_sanitizer_mismatch_note: runtimeReplaySanitizerMismatchNote,
+          runtime_replay_build_method_mismatch_replay_failed: runtimeReplayBuildMethodMismatchReplayFailed,
+          runtime_replay_build_method_mismatch_note: runtimeReplayBuildMethodMismatchNote,
           tampered_replay_failed: true,
         },
         evidencePair: {
@@ -1189,6 +1406,7 @@ try {
           resolved_commit_hashes_differ: pairRecord.resolved_commit_hashes_differ,
           frame_bytes_equal: pairRecord.frame_bytes_equal,
           budget_profile_equal: pairRecord.budget_profile_equal,
+          sanitizers_used_equal: pairRecord.sanitizers_used_equal,
           provenance_complete: pairRecord.provenance_complete,
           frames_delivered_on_both_sides: pairRecord.frames_delivered_on_both_sides,
           meaningful_outcomes_on_both_sides: pairRecord.meaningful_outcomes_on_both_sides,
