@@ -13,6 +13,16 @@ import {
   type MavlinkParserFuzzOutcome,
 } from "./mavlink-parser-fuzz.js";
 import {
+  loadPx4RuntimeReplayConfig,
+  px4RuntimeReplayArtifactPaths,
+  producePx4RuntimeReplayEvidence,
+  validatePx4RuntimeReplayTarget,
+  Px4RuntimeReplayValidationError,
+  type Px4RuntimeReplayConfig,
+  type Px4RuntimeReplayOutcome,
+  type Px4RuntimeReplayOutcomeKind,
+} from "./px4-runtime-replay.js";
+import {
   loadPx4SitlProbeConfig,
   px4SitlProbeArtifactPaths,
   producePx4SitlProbeEvidence,
@@ -75,7 +85,12 @@ export interface EvidenceSignal {
   interpretation: string;
 }
 
-export type RunnerKind = "fake-smoke" | "static-source-evidence" | "mavlink-parser-fuzz" | "px4-sitl-probe";
+export type RunnerKind =
+  | "fake-smoke"
+  | "static-source-evidence"
+  | "mavlink-parser-fuzz"
+  | "px4-sitl-probe"
+  | "px4-runtime-replay";
 
 export interface EvidenceResult {
   job_id: string;
@@ -91,6 +106,23 @@ export interface EvidenceResult {
   static_source?: StaticSourceResultMetadata;
   mavlink_parser_fuzz?: MavlinkParserFuzzResultMetadata;
   px4_sitl_probe?: Px4SitlProbeResultMetadata;
+  px4_runtime_replay?: Px4RuntimeReplayResultMetadata;
+}
+
+export interface Px4RuntimeReplayResultMetadata {
+  case_id: string;
+  test_card_id: string;
+  target_commit: string;
+  resolved_commit_hash: string;
+  outcome?: Px4RuntimeReplayOutcomeKind;
+  failure_stage?: string;
+  pymavlink_version: string;
+  python_version: string;
+  mavlink_connection: string;
+  frame_delivered: boolean;
+  firmware_commit_proven: boolean;
+  px4_binary_present: boolean;
+  budget_profile: string;
 }
 
 export interface Px4SitlProbeResultMetadata {
@@ -211,6 +243,10 @@ const PX4_SITL_PROBE_RUNNER_ENTRYPOINT = "src/runners/px4-sitl-probe-runner.ts";
 const PX4_SITL_PROBE_RUNNER_SCRIPT_PATH = fileURLToPath(
   new URL("../runners/px4-sitl-probe-runner.ts", import.meta.url),
 );
+const PX4_RUNTIME_REPLAY_RUNNER_ENTRYPOINT = "src/runners/px4-runtime-replay-runner.ts";
+const PX4_RUNTIME_REPLAY_RUNNER_SCRIPT_PATH = fileURLToPath(
+  new URL("../runners/px4-runtime-replay-runner.ts", import.meta.url),
+);
 const RUNNER_CANCEL_SIGNAL = "SIGTERM" as const;
 const JOB_LOCK_DIR_NAME = ".state-lock";
 const JOB_FILE_LOCK_TIMEOUT_MS = 5000;
@@ -219,6 +255,7 @@ const FAKE_STEP_DELAY_MS = 250;
 const STATIC_SOURCE_EXPECTED_DURATION_MS = 120_000;
 const MAVLINK_PARSER_FUZZ_EXPECTED_DURATION_MS = 180_000;
 const PX4_SITL_PROBE_EXPECTED_DURATION_MS = 180_000;
+const PX4_RUNTIME_REPLAY_EXPECTED_DURATION_MS = 240_000;
 const FAKE_STEPS = [
   {
     phase: "preparing-fixtures",
@@ -681,7 +718,9 @@ async function completeFailedJob(jobId: string, message: string): Promise<JobSta
           ? `The MAVLink parser fuzz runner failed: ${message}`
           : runnerKind === "px4-sitl-probe"
             ? `The PX4 SITL probe runner failed: ${message}`
-            : `The fake evidence runner failed: ${message}`;
+            : runnerKind === "px4-runtime-replay"
+              ? `The PX4 runtime replay runner failed: ${message}`
+              : `The fake evidence runner failed: ${message}`;
     const cautions =
       runnerKind === "static-source-evidence"
         ? ["This is a static-source runner infrastructure failure, not firmware evidence."]
@@ -695,7 +734,12 @@ async function completeFailedJob(jobId: string, message: string): Promise<JobSta
                 "This is a PX4 SITL probe runner infrastructure failure, not runtime observation evidence.",
                 "This does not prove firmware safety.",
               ]
-            : ["This is a fake runner infrastructure failure, not firmware evidence."];
+            : runnerKind === "px4-runtime-replay"
+              ? [
+                  "This is a PX4 runtime replay runner infrastructure failure, not a runtime observation.",
+                  "This does not prove firmware safety or vulnerability discovery.",
+                ]
+              : ["This is a fake runner infrastructure failure, not firmware evidence."];
     const result: EvidenceResult = {
       job_id: jobId,
       state: "failed",
@@ -1512,6 +1556,231 @@ export async function runStandalonePx4SitlProbeJob(jobId: string): Promise<void>
   }
 }
 
+function replayArtifactPaths(jobId: string, outcome: Px4RuntimeReplayOutcome): string[] {
+  const paths = jobPaths(jobId);
+  return px4RuntimeReplayArtifactPaths(paths.artifactDirAbs, outcome).map(relativeToRepo);
+}
+
+async function buildPx4RuntimeReplayResult(
+  record: JobRecord,
+  outcome: Px4RuntimeReplayOutcome,
+  completedAt: string,
+): Promise<EvidenceResult> {
+  const artifactList = replayArtifactPaths(record.job_id, outcome);
+  const caseId = record.request.case_id;
+  const testCardId = record.request.test_card_id;
+  const targetCommit = record.request.target_commit;
+  const budgetProfile = record.request.budget_profile;
+
+  if (outcome.kind === "failure") {
+    const failure = outcome.failure;
+    return {
+      job_id: record.job_id,
+      state: "failed",
+      verdict: "runner_failed",
+      confidence: "low",
+      summary: failure.summary,
+      evidence_signals: [
+        {
+          name: "px4_runtime_replay_runner_outcome",
+          value: failure.stage,
+          interpretation: "PX4 runtime replay runner could not complete a frame delivery observation.",
+        },
+      ],
+      artifact_paths: artifactList,
+      cautions: failure.caveats,
+      completed_at: completedAt,
+      runner_kind: "px4-runtime-replay",
+      px4_runtime_replay: {
+        case_id: caseId,
+        test_card_id: testCardId,
+        target_commit: targetCommit,
+        resolved_commit_hash: "unknown",
+        failure_stage: failure.stage,
+        pymavlink_version: "unknown",
+        python_version: "unknown",
+        mavlink_connection: "unknown",
+        frame_delivered: false,
+        firmware_commit_proven: false,
+        px4_binary_present: false,
+        budget_profile: budgetProfile,
+      },
+    };
+  }
+
+  const evidence = outcome.evidence;
+  const verdict =
+    evidence.outcome === "runtime_clean"
+      ? "manual_review_needed"
+      : evidence.outcome === "runtime_anomalous"
+        ? "attention_required"
+        : "manual_review_needed";
+  const confidence = evidence.outcome === "runtime_clean" ? "medium" : "low";
+
+  const signals: EvidenceSignal[] = [
+    {
+      name: "px4_runtime_replay_outcome",
+      value: evidence.outcome,
+      interpretation: evidence.summary,
+    },
+    {
+      name: "px4_resolved_commit_hash",
+      value: evidence.resolved_commit_hash,
+      interpretation: "Post-patch commit hash requested for this replay job.",
+    },
+    {
+      name: "crafted_frame_delivered",
+      value: evidence.frame_delivered,
+      interpretation: evidence.frame_delivered
+        ? "The harness sent the crafted BATTERY_STATUS frame to PX4."
+        : "The crafted frame was not delivered; see delivery-record.json.",
+    },
+    {
+      name: "px4_sitl_binary_present",
+      value: evidence.px4_binary_present,
+      interpretation: evidence.px4_binary_present
+        ? "A local PX4 SITL binary file was present during the replay attempt."
+        : "No local PX4 SITL binary file was present; see preflight and setup artifacts.",
+    },
+    {
+      name: "firmware_commit_proven",
+      value: evidence.firmware_commit_proven,
+      interpretation: evidence.firmware_commit_proven
+        ? "A build manifest or fresh build proves the executed SITL binary matches the resolved commit."
+        : "The runner did not execute firmware with verified commit provenance.",
+    },
+    {
+      name: "mavlink_connection",
+      value: evidence.mavlink_connection,
+      interpretation: "MAVLink connection string used for frame delivery.",
+    },
+  ];
+
+  return {
+    job_id: record.job_id,
+    state: "succeeded",
+    verdict,
+    confidence,
+    summary: evidence.summary,
+    evidence_signals: signals,
+    artifact_paths: artifactList,
+    cautions: evidence.caveats,
+    completed_at: completedAt,
+    runner_kind: "px4-runtime-replay",
+    px4_runtime_replay: {
+      case_id: caseId,
+      test_card_id: testCardId,
+      target_commit: targetCommit,
+      resolved_commit_hash: evidence.resolved_commit_hash,
+      outcome: evidence.outcome,
+      pymavlink_version: evidence.pymavlink_version,
+      python_version: evidence.python_version,
+      mavlink_connection: evidence.mavlink_connection,
+      frame_delivered: evidence.frame_delivered,
+      firmware_commit_proven: evidence.firmware_commit_proven,
+      px4_binary_present: evidence.px4_binary_present,
+      budget_profile: budgetProfile,
+    },
+  };
+}
+
+async function completeWithPx4RuntimeReplayOutcome(
+  record: JobRecord,
+  outcome: Px4RuntimeReplayOutcome,
+): Promise<JobStatus> {
+  return withJobLock(record.job_id, async () => {
+    const current = await readStatus(record.job_id);
+    if (terminal(current.state)) {
+      return current;
+    }
+    const beforeResult = await readStatus(record.job_id);
+    if (terminal(beforeResult.state)) {
+      return beforeResult;
+    }
+    const completedAt = nowIso();
+    const result = await buildPx4RuntimeReplayResult(record, outcome, completedAt);
+    const paths = jobPaths(record.job_id);
+    await writeJson(paths.resultPath, result);
+    const finalStatus = await updateStatusUnlocked(record.job_id, {
+      state: result.state,
+      phase: result.state === "failed" ? "failed" : "complete",
+      progress: 100,
+      finished_at: result.completed_at,
+      message:
+        result.state === "failed"
+          ? result.summary
+          : "PX4 BATTERY_STATUS runtime replay evidence job completed.",
+    });
+    if (finalStatus.state === "cancelled" && finalStatus.state !== result.state) {
+      await writeJson(
+        paths.resultPath,
+        buildCancelledResult(record.job_id, finalStatus.finished_at ?? nowIso(), finalStatus.runner?.type),
+      );
+    }
+    return finalStatus;
+  });
+}
+
+export async function runStandalonePx4RuntimeReplayJob(jobId: string): Promise<void> {
+  assertSafeJobId(jobId);
+  const controller = new AbortController();
+  installRunnerSignalHandlers(jobId, {
+    kindLabel: "PX4 runtime replay runner",
+    onAbort: () => controller.abort(),
+  });
+  try {
+    if (await shouldStopRunner(jobId)) {
+      return;
+    }
+    const startedStatus = await updateStatus(jobId, {
+      state: "running",
+      phase: "starting",
+      progress: 5,
+      started_at: nowIso(),
+      message: "Standalone PX4 runtime replay runner process started.",
+    });
+    if (terminal(startedStatus.state)) {
+      return;
+    }
+
+    const record = await readJobRecord(jobId);
+    const paths = jobPaths(jobId);
+    const outcome = await producePx4RuntimeReplayEvidence({
+      case_id: record.request.case_id,
+      test_card_id: record.request.test_card_id,
+      target_commit: record.request.target_commit,
+      budget_profile: record.request.budget_profile,
+      artifact_dir: paths.artifactDirAbs,
+      signal: controller.signal,
+      onProgress: async (phase, progress, message) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (await shouldStopRunner(jobId)) {
+          return;
+        }
+        await updateStatus(jobId, {
+          state: "running",
+          phase,
+          progress,
+          message,
+        });
+      },
+    });
+
+    if (await shouldStopRunner(jobId)) {
+      return;
+    }
+    await completeWithPx4RuntimeReplayOutcome(record, outcome);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    await completeFailedJob(jobId, message);
+  }
+}
+
 function runnerEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of ["PATH", "TMPDIR", "TEMP", "TMP", "NODE_ENV"] as const) {
@@ -1536,6 +1805,7 @@ function chooseRunnerLaunchPlan(
   staticConfig: StaticSourceConfig,
   fuzzConfig: MavlinkParserFuzzConfig,
   probeConfig: Px4SitlProbeConfig,
+  replayConfig: Px4RuntimeReplayConfig,
 ): RunnerLaunchPlan {
   if (Object.prototype.hasOwnProperty.call(staticConfig.cases, caseId)) {
     return {
@@ -1543,6 +1813,14 @@ function chooseRunnerLaunchPlan(
       entrypoint: STATIC_SOURCE_RUNNER_ENTRYPOINT,
       scriptPath: STATIC_SOURCE_RUNNER_SCRIPT_PATH,
       expectedDurationMs: STATIC_SOURCE_EXPECTED_DURATION_MS,
+    };
+  }
+  if (Object.prototype.hasOwnProperty.call(replayConfig.cases, caseId)) {
+    return {
+      kind: "px4-runtime-replay",
+      entrypoint: PX4_RUNTIME_REPLAY_RUNNER_ENTRYPOINT,
+      scriptPath: PX4_RUNTIME_REPLAY_RUNNER_SCRIPT_PATH,
+      expectedDurationMs: PX4_RUNTIME_REPLAY_EXPECTED_DURATION_MS,
     };
   }
   if (Object.prototype.hasOwnProperty.call(probeConfig.cases, caseId)) {
@@ -1629,7 +1907,9 @@ function signalRunnerProcess(status: JobStatus): RunnerSignalResult {
         ? "MAVLink parser fuzz runner"
         : status.runner?.type === "px4-sitl-probe"
           ? "PX4 SITL probe runner"
-          : "fake runner";
+          : status.runner?.type === "px4-runtime-replay"
+            ? "PX4 runtime replay runner"
+            : "fake runner";
   try {
     process.kill(pid, RUNNER_CANCEL_SIGNAL);
     return {
@@ -1657,14 +1937,25 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
     throw new Error("target_commit must be a non-empty string.");
   }
 
-  const [resolvedCase, resolvedTestCard, staticConfig, fuzzConfig, probeConfig] = await Promise.all([
+  const [resolvedCase, resolvedTestCard, staticConfig, fuzzConfig, probeConfig, replayConfig] =
+    await Promise.all([
     loadCase(params.case_id),
     loadTestCard(params.test_card_id),
     loadStaticSourceConfig(),
     loadMavlinkParserFuzzConfig(),
     loadPx4SitlProbeConfig(),
+    loadPx4RuntimeReplayConfig(),
   ]);
-  const plan = chooseRunnerLaunchPlan(params.case_id, staticConfig, fuzzConfig, probeConfig);
+  const plan = chooseRunnerLaunchPlan(
+    params.case_id,
+    staticConfig,
+    fuzzConfig,
+    probeConfig,
+    replayConfig,
+  );
+  if (plan.kind === "px4-runtime-replay") {
+    validatePx4RuntimeReplayTarget(params.target_commit, replayConfig, staticConfig);
+  }
   const jobId = createJobId();
   const paths = jobPaths(jobId);
   const launchedAt = nowIso();
@@ -1692,7 +1983,9 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
         ? "MAVLink parser fuzz evidence job queued."
         : plan.kind === "px4-sitl-probe"
           ? "PX4 SITL runtime probe evidence job queued."
-          : "Fake evidence job queued.";
+          : plan.kind === "px4-runtime-replay"
+            ? "PX4 BATTERY_STATUS runtime replay evidence job queued."
+            : "Fake evidence job queued.";
   const status: JobStatus = {
     job_id: jobId,
     state: "queued",

@@ -115,6 +115,9 @@ function runnerLabel(runnerKind) {
   if (runnerKind === "px4-sitl-probe") {
     return "PX4 SITL runtime probe";
   }
+  if (runnerKind === "px4-runtime-replay") {
+    return "PX4 BATTERY_STATUS runtime replay";
+  }
   return text(runnerKind, "unknown runner");
 }
 
@@ -130,6 +133,9 @@ function runnerClass(runnerKind) {
   }
   if (runnerKind === "px4-sitl-probe") {
     return "runner-pill probe";
+  }
+  if (runnerKind === "px4-runtime-replay") {
+    return "runner-pill replay";
   }
   return "runner-pill";
 }
@@ -232,11 +238,19 @@ function renderDetail(detail) {
   elements.phaseLabel.textContent = text(detail.phase);
   elements.verdictLabel.textContent = titleize(detail.result?.verdict || detail.verdict || "pending");
   const probeMeta = detail.result?.px4_sitl_probe;
+  const replayMeta = detail.result?.px4_runtime_replay;
   const probeKindLabel = probeMeta?.failure_stage
     ? `runner failed (${probeMeta.failure_stage})`
     : probeMeta?.outcome;
+  const replayKindLabel = replayMeta?.failure_stage
+    ? `runner failed (${replayMeta.failure_stage})`
+    : replayMeta?.outcome;
   elements.verdictKindLabel.textContent = titleize(
-    detail.result?.static_source?.verdict_kind || probeKindLabel || detail.verdict_kind || "pending",
+    detail.result?.static_source?.verdict_kind ||
+      replayKindLabel ||
+      probeKindLabel ||
+      detail.verdict_kind ||
+      "pending",
   );
 
   renderCaveats(detail);
@@ -257,6 +271,9 @@ function renderCaveats(detail) {
   }
   if (detail.runner_kind === "px4-sitl-probe") {
     caveats.push("PX4 runtime probe evidence only. A heartbeat observation does not prove firmware safety or parser-bounds fixes at runtime.");
+  }
+  if (detail.runner_kind === "px4-runtime-replay") {
+    caveats.push("PX4 runtime replay evidence only. One crafted frame delivery is not proof of firmware safety or vulnerability discovery.");
   }
   for (const caution of detail.result?.cautions || []) {
     if (!caveats.includes(caution)) {

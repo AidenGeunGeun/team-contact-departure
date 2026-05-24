@@ -12,11 +12,13 @@ The project shows an agent reading curated public firmware-evidence cases, choos
 - One case now produces real evidence from real PX4 source at pinned upstream commits.
 - One case now launches a real MAVLink parser-library fuzz runner using pymavlink.
 - One case now launches a real PX4 SITL runtime probe that either observes live MAVLink behavior or records why the local environment could not run PX4.
+- One case now launches a real PX4 BATTERY_STATUS runtime replay that builds at a pinned post-patch commit, delivers a crafted MAVLink frame, and records PX4's response.
 
 ## What This Does Not Claim
 
 - It does not prove firmware safety.
 - PX4 SITL runtime probe evidence is bounded to a local headless boot and MAVLink heartbeat observation; it is not full runtime fuzzing or replay.
+- PX4 runtime replay evidence is one observation against one crafted BATTERY_STATUS frame; it is not safety proof or vulnerability discovery.
 - Parser-library fuzz evidence uses pymavlink on mutated frames; it does not prove PX4 firmware runtime behavior.
 - It does not discover a new vulnerability.
 - It does not use real supplier-confidential documents.
@@ -51,6 +53,7 @@ For a custom one-shot request:
 npm run agent -- "Evaluate the parser-bounds case at the post-patch alias and summarize cautiously."
 npm run agent -- "Run the MAVLink parser library fuzz case with smoke-fast budget and summarize cautiously."
 npm run agent -- "Run the PX4 SITL runtime probe case with smoke-fast budget and summarize cautiously."
+npm run agent -- "Run the mavlink-battery-status-runtime-replay case at mavlink-battery-status-bounds-post with smoke-fast budget and summarize cautiously."
 ```
 
 For a model-backed parser-fuzz demo:
@@ -124,6 +127,7 @@ This is the core difference from “just ask a coding agent to run commands.” 
 | `mavlink-battery-status-bounds` | Real static-source inspection of PX4 PR #18411 commit pair. | Real, static-only evidence. |
 | `mavlink-parser-library-fuzz` | Real pymavlink parser-library fuzz on mutated BATTERY_STATUS frames. | Real parser-library action evidence; not PX4 SITL. |
 | `px4-runtime-probe` | Real PX4 SITL runtime probe with preflight, setup notes, and MAVLink observation when possible. | Real runtime probe evidence; not proof of firmware safety. |
+| `mavlink-battery-status-runtime-replay` | Real PX4 SITL runtime replay at pinned post-patch commit with crafted BATTERY_STATUS frame delivery. | One runtime observation; not safety proof or vulnerability discovery. |
 | `mavlink-ftp-path-handling` | Fake smoke runner that simulates path-handling evidence. | Demo scaffold only. |
 | `unclear-telemetry-dropout-claim` | Fake/manual-review smoke runner for vague supplier claims. | Demo scaffold only. |
 
@@ -134,6 +138,7 @@ This is the core difference from “just ask a coding agent to run commands.” 
 | Static PX4 source evidence | Real for PR #18411 parser-bounds case. |
 | MAVLink parser-library fuzz evidence | Real, using `pymavlink`; not PX4 SITL. |
 | PX4 SITL runtime probe evidence | Real when a local SITL binary is available; otherwise records runtime-unavailable blockers. |
+| PX4 BATTERY_STATUS runtime replay evidence | Real when PX4 can be built/run locally; delivers one crafted frame and records the observation. |
 | Fake-smoke evidence | Still scaffold for FTP/vague cases. |
 
 ## Real vs Fake
@@ -146,6 +151,7 @@ This is the core difference from “just ask a coding agent to run commands.” 
 | Parser-bounds case | Real PX4 source fetch, real pinned commits, real source context, real diff. | Static-only; no runtime execution. |
 | Parser-library fuzz case | Real pymavlink install, real seed generation, real mutations, real parser outcomes. | Parser-library only; not PX4 SITL or firmware runtime proof. |
 | PX4 runtime probe case | Real preflight, PX4 setup notes, optional headless SITL boot, MAVLink observation when possible. | Runtime probe only; heartbeat observation does not prove firmware safety. |
+| PX4 runtime replay case | Real commit checkout/build, headless SITL boot, crafted BATTERY_STATUS frame delivery, observation artifacts. | One runtime observation only; not safety proof or vulnerability discovery. |
 | FTP case | Job lifecycle and dashboard are real. | Evidence content is simulated. |
 | Telemetry vague-claim case | Job lifecycle and dashboard are real. | Evidence content is simulated/manual-review style. |
 | Dashboard | Real local read-only viewer over run folders. | Visual polish is intentionally basic for now. |
@@ -210,6 +216,26 @@ Outcome semantics are deliberately narrow:
 
 This is PX4 runtime probe evidence only. It does not prove firmware safety, parser-bounds fixes at runtime, or vulnerability replay.
 
+## PX4 BATTERY_STATUS Runtime Replay Path
+
+The first real PX4 runtime replay path is case `mavlink-battery-status-runtime-replay` with test card `px4-runtime-replay`.
+
+The runner:
+
+1. Resolves `target_commit` to a pinned PX4 hash (for example `mavlink-battery-status-bounds-post`).
+2. Writes preflight and records the exact crafted BATTERY_STATUS frame bytes (`frame-record.json`, `frame-record.hex`).
+3. Checks out the PX4 cache at the resolved commit and builds or reuses `px4_sitl_default` when the budget profile allows.
+4. Boots headless PX4 SITL, waits for MAVLink, delivers the bounds-test frame via pymavlink, and observes whether PX4 stays up.
+5. Writes delivery and observation artifacts plus a cautious summary.
+
+Outcome semantics are deliberately narrow:
+
+- `runtime_clean` means PX4 booted, the crafted frame was delivered, and no crash or abnormal log markers were observed in the observation window.
+- `runtime_anomalous` means the frame was delivered but PX4 exited, logged abnormal markers, or otherwise behaved unexpectedly; this warrants follow-up, not a vulnerability verdict.
+- `runtime_unavailable` means prerequisites or a local SITL binary were missing; artifacts explain the blocker.
+
+This is runtime replay evidence only. It is one observation against one crafted frame, not proof of firmware safety or autonomous vulnerability discovery.
+
 ## Dashboard
 
 The dashboard is step two: a read-only inspection layer over the run folders the agent creates.
@@ -260,7 +286,7 @@ agent-runs/<timestamp>/summary.json
 | Command | What it proves |
 | --- | --- |
 | `npm run typecheck` | TypeScript compiles. |
-| `npm run smoke:offline` | Tool allowlist, job lifecycle, fake runners, static-source runner, MAVLink parser fuzz runner, PX4 SITL probe runner, cancellation, and artifacts work without model calls. |
+| `npm run smoke:offline` | Tool allowlist, job lifecycle, fake runners, static-source runner, MAVLink parser fuzz runner, PX4 SITL probe runner, PX4 runtime replay runner, cancellation, and artifacts work without model calls. |
 | `npm run smoke:operator` | Agent transcript/report formatting works without model calls. |
 | `npm run demo:agent` | The product-facing agent orchestrates the parser-bounds case end to end and writes a local transcript. Requires `openai-codex` auth. |
 | `npm run demo:agent -- --parser-fuzz` | Same as above, but drives the parser-library fuzz case instead of static-source. Requires `openai-codex` auth. |
@@ -306,10 +332,11 @@ agent-runs/                   ignored local agent transcripts and summaries
 
 ## Current Limitations
 
-- Three cases have real evidence today: static PX4 source, parser-library fuzz, and PX4 SITL runtime probe.
+- Four cases have real evidence today: static PX4 source, parser-library fuzz, PX4 SITL runtime probe, and PX4 BATTERY_STATUS runtime replay (one crafted frame observation, not safety proof).
 - Static-source evidence does not execute firmware.
 - Parser-library fuzz uses pymavlink only; it is not PX4 SITL or handler runtime proof.
 - PX4 SITL runtime probe needs Python 3, build tools, and a local PX4 SITL binary for a full runtime-observed result; offline smoke expects the stable runtime-unavailable path when the binary is absent.
+- PX4 BATTERY_STATUS runtime replay needs a verifiable post-patch SITL build manifest (or a fresh build under `local-default`); offline smoke expects `runtime_unavailable` when provenance is missing.
 - PX4 source is fetched from GitHub, so the static-source runner needs network access unless the cache is already warm.
 - The parser fuzz runner needs Python 3 and network access on first run to create the pymavlink venv.
 - The local dashboard assumes trusted local run folders and binds to `127.0.0.1` by default.

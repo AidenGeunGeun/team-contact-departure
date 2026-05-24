@@ -1,0 +1,35 @@
+{
+  "repository": {
+    "name": "PX4-Autopilot",
+    "url": "https://github.com/PX4/PX4-Autopilot.git"
+  },
+  "static_source_case_id": "mavlink-battery-status-bounds",
+  "pymavlink_version": "2.4.41",
+  "python_commands": ["python3", "python"],
+  "px4_cache_dir": ".cache/px4",
+  "sitl_binary_relative": "build/px4_sitl_default/bin/px4",
+  "build_manifest_filename": ".contact-departure-sitl-build.json",
+  "mavlink_connection": "udp:127.0.0.1:14540",
+  "cases": {
+    "mavlink-battery-status-runtime-replay": {
+      "description": "PX4 runtime replay that delivers a crafted BATTERY_STATUS frame at a pinned post-patch commit.",
+      "default_target_commit": "mavlink-battery-status-bounds-post"
+    }
+  },
+  "budget_profiles": {
+    "smoke-fast": {
+      "attempt_build": false,
+      "build_timeout_sec": 0,
+      "replay_timeout_sec": 25,
+      "heartbeat_timeout_sec": 15,
+      "observation_sec": 5
+    },
+    "local-default": {
+      "attempt_build": true,
+      "build_timeout_sec": 900,
+      "replay_timeout_sec": 90,
+      "heartbeat_timeout_sec": 45,
+      "observation_sec": 10
+    }
+  }
+}

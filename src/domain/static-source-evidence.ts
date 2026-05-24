@@ -422,6 +422,38 @@ async function ensureCommit(repoUrl: string, hash: string, signal?: AbortSignal)
   }
 }
 
+export async function ensurePx4CommitInCache(
+  repoUrl: string,
+  hash: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  await ensureCommit(repoUrl, hash, signal);
+}
+
+export async function checkoutPx4CacheCommit(
+  hash: string,
+  signal?: AbortSignal,
+): Promise<{ checked_out: boolean; previous_head?: string }> {
+  const headResult = await runGit(["rev-parse", "HEAD"], { signal, allowFailure: true });
+  const previousHead = headResult.exitCode === 0 ? headResult.stdout.trim() : undefined;
+  if (previousHead === hash) {
+    return { checked_out: false, previous_head: previousHead };
+  }
+  await runGit(["checkout", "--force", "--detach", hash], {
+    signal,
+    timeoutMs: GIT_LOCAL_TIMEOUT_MS * 4,
+  });
+  return { checked_out: true, previous_head: previousHead };
+}
+
+export async function readPx4CacheHead(signal?: AbortSignal): Promise<string | undefined> {
+  const headResult = await runGit(["rev-parse", "HEAD"], { signal, allowFailure: true });
+  if (headResult.exitCode !== 0) {
+    return undefined;
+  }
+  return headResult.stdout.trim();
+}
+
 async function readFileAtCommit(hash: string, path: string, signal?: AbortSignal): Promise<string> {
   const result = await runGit(["show", `${hash}:${path}`], { signal });
   return result.stdout;

@@ -11,6 +11,20 @@
     ]
   },
   {
+    "id": "px4-runtime-replay",
+    "title": "PX4 BATTERY_STATUS runtime replay",
+    "plain_language_use": "Use this when you need one real PX4 runtime observation: boot SITL at a pinned commit, deliver a crafted MAVLink BATTERY_STATUS frame, and record how PX4 responded.",
+    "conceptual_run": "Resolve target_commit to the post-patch PX4 hash, preflight build/runtime dependencies, checkout/build PX4 SITL, boot headless, send the bounds-test BATTERY_STATUS frame via pymavlink, observe whether PX4 stays up, and write frame/delivery/observation artifacts with explicit caveats.",
+    "evidence_signals": [
+      "preflight-report.json records tool and dependency availability",
+      "px4-setup.log explains whether PX4 was checked out, built, reused, or blocked",
+      "frame-record.json and frame-record.hex capture the exact crafted MAVLink bytes",
+      "delivery-record.json records when the frame was sent and any pymavlink-side errors",
+      "observation-record.json records whether PX4 stayed up or showed abnormal runtime behavior",
+      "evidence-summary.md states runtime_clean, runtime_anomalous, or runtime_unavailable without claiming safety proof"
+    ]
+  },
+  {
     "id": "px4-sitl-probe",
     "title": "PX4 SITL runtime probe",
     "plain_language_use": "Use this when you need to show the agent reached a real PX4 runtime surface and either observed live MAVLink behavior or recorded why the local environment could not run PX4.",
