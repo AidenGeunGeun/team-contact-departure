@@ -2,7 +2,7 @@ import type { ContactCliOperation, ContactCliSummary } from "./types.js";
 
 const JOB_ID_PATTERN = /job-[A-Za-z0-9_-]+/g;
 
-function asCommand(value: unknown): string | undefined {
+export function asCommand(value: unknown): string | undefined {
   if (typeof value === "string" && value.trim().length > 0) {
     return value;
   }
@@ -18,14 +18,28 @@ function asText(value: unknown): string | undefined {
     return value;
   }
   if (value && typeof value === "object") {
+    if ("details" in value) {
+      const nested = asText((value as { details?: unknown }).details);
+      if (nested) {
+        return nested;
+      }
+    }
     if ("stdout" in value && typeof (value as { stdout?: unknown }).stdout === "string") {
-      return (value as { stdout: string }).stdout;
+      const stdout = (value as { stdout: string }).stdout;
+      const stderr =
+        "stderr" in value && typeof (value as { stderr?: unknown }).stderr === "string"
+          ? (value as { stderr: string }).stderr
+          : "";
+      return [stdout, stderr].filter(Boolean).join("\n");
     }
     if ("output" in value && typeof (value as { output?: unknown }).output === "string") {
       return (value as { output: string }).output;
     }
-    if ("details" in value && typeof (value as { details?: unknown }).details === "string") {
-      return (value as { details: string }).details;
+    if ("stderr" in value && typeof (value as { stderr?: unknown }).stderr === "string") {
+      return (value as { stderr: string }).stderr;
+    }
+    if ("error" in value && typeof (value as { error?: unknown }).error === "string") {
+      return (value as { error: string }).error;
     }
   }
   return undefined;

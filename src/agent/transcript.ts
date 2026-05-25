@@ -90,6 +90,7 @@ export class AgentRunRecorder {
   readonly startedAt: Date;
 
   private assistantText = "";
+  private thinkingText = "";
   private toolActivity: ToolActivityEntry[] = [];
   private activeToolByCallId = new Map<string, ToolActivityEntry>();
   private jobIds = new Set<string>();
@@ -105,6 +106,10 @@ export class AgentRunRecorder {
 
   appendAssistantText(delta: string): void {
     this.assistantText += delta;
+  }
+
+  appendThinkingText(delta: string): void {
+    this.thinkingText += delta;
   }
 
   recordToolStart(toolCallId: string, toolName: string, args: unknown): void {
@@ -169,6 +174,10 @@ export class AgentRunRecorder {
           lines.push(`Result${entry.isError ? " (error)" : ""}:`, "", "```json", formatJson(entry.result), "```", "");
         }
       }
+    }
+
+    if (this.thinkingText.trim()) {
+      lines.push("## Thinking", "", this.thinkingText.trim(), "");
     }
 
     lines.push("## Final Answer", "", this.assistantText.trim() || "_No assistant answer recorded._", "");

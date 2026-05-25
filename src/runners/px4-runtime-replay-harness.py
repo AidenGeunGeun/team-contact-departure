@@ -58,6 +58,22 @@ def truncate_log(text: str, limit: int = 120_000) -> str:
     return text[:limit] + f"\n... truncated ({len(text) - limit} bytes omitted)\n"
 
 
+def shrink_runtime_log(path: Path, head_bytes: int = 60_000, tail_bytes: int = 60_000) -> None:
+    if not path.exists():
+        return
+    size = path.stat().st_size
+    if size <= head_bytes + tail_bytes:
+        return
+    with path.open("rb") as handle:
+        head = handle.read(head_bytes)
+        handle.seek(max(0, size - tail_bytes))
+        tail = handle.read(tail_bytes)
+    marker = f"\n... runtime.log truncated by harness ({size - head_bytes - tail_bytes} bytes omitted) ...\n".encode(
+        "utf-8"
+    )
+    path.write_bytes(head + marker + tail)
+
+
 def parse_sanitizer_findings(log_text: str) -> list[dict[str, Any]]:
     """Extract structured ASan/UBSan findings from PX4 combined stdout/stderr."""
     findings: list[dict[str, Any]] = []
@@ -128,19 +144,42 @@ def build_bounds_test_battery_status(mav: dialect.MAVLink) -> tuple[bytes, dict[
     return packed, record
 
 
-def start_px4(px4_root: Path, px4_binary: Path, runtime_log: Path) -> subprocess.Popen[str]:
+def px4_make_target(px4_root: Path, px4_binary: Path, build_method: str) -> str:
+    default_binary = px4_root / "build" / "px4_sitl_default" / "bin" / "px4"
+    asan_binary = px4_root / "build" / "px4_sitl_default_asan" / "bin" / "px4"
+    resolved_binary = px4_binary.resolve()
+    if build_method == "px4_sitl_default_asan" or resolved_binary == asan_binary.resolve():
+        if resolved_binary != asan_binary.resolve():
+            raise RuntimeError(
+                f"Verified PX4 binary {px4_binary} does not match px4_sitl_default_asan launch target {asan_binary}"
+            )
+        return "px4_sitl_default_asan"
+    if resolved_binary != default_binary.resolve():
+        raise RuntimeError(
+            f"Verified PX4 binary {px4_binary} does not match px4_sitl_default launch target {default_binary}"
+        )
+    return "px4_sitl_default"
+
+
+def start_px4(px4_root: Path, px4_binary: Path, runtime_log: Path, build_method: str) -> subprocess.Popen[str]:
     env = os.environ.copy()
-    env.setdefault("PX4_SIM_MODEL", "none")
+    env["PX4_SIM_MODEL"] = "iris"
+    env["HEADLESS"] = "1"
     env.setdefault("PX4_SIM_SPEED_FACTOR", "1")
     log_handle = runtime_log.open("w", encoding="utf-8")
-    cmd = [str(px4_binary), "etc/init.d-posix/rcS"]
+    make_target = px4_make_target(px4_root, px4_binary, build_method)
+    cmd = ["make", make_target, "jmavsim"]
+    if build_method == "px4_asan_make_var":
+        cmd.append("PX4_ASAN=1")
     proc = subprocess.Popen(
         cmd,
         cwd=str(px4_root),
+        stdin=subprocess.PIPE,
         stdout=log_handle,
         stderr=subprocess.STDOUT,
         env=env,
         text=True,
+        start_new_session=True,
     )
     return proc
 
@@ -225,6 +264,7 @@ def main() -> int:
     parser.add_argument("--heartbeat-timeout-sec", type=int, default=45)
     parser.add_argument("--observation-sec", type=int, default=10)
     parser.add_argument("--pymavlink-version", default="unknown")
+    parser.add_argument("--build-method", default="unknown")
     parser.add_argument(
         "--prepare-frame-only",
         action="store_true",
@@ -270,7 +310,7 @@ def main() -> int:
     started_at = utc_now()
     replay_deadline = time.monotonic() + float(args.replay_timeout_sec)
     try:
-        proc = start_px4(px4_root, px4_binary, runtime_log)
+        proc = start_px4(px4_root, px4_binary, runtime_log, args.build_method)
         time.sleep(min(2.0, max(0.0, replay_deadline - time.monotonic())))
         if proc.poll() is not None:
             observation = {
@@ -365,7 +405,7 @@ def main() -> int:
         if anomalous:
             if len(sanitizer_findings) > 0:
                 summary["error"] = (
-                    "AddressSanitizer/UndefinedBehaviorSanitizer reported findings after the crafted "
+                    "Sanitizer instrumentation reported findings after the crafted "
                     "frame was delivered; PX4 may still be running. This is structural instrumentation "
                     "evidence, not a crash-exit verdict."
                 )
@@ -382,21 +422,26 @@ def main() -> int:
         print(json.dumps({"status": "harness_failed", "error": str(exc), "traceback": tb}))
         return 2
     finally:
-        if proc is not None and proc.poll() is None:
+        if proc is not None:
             try:
-                proc.send_signal(signal.SIGTERM)
+                os.killpg(proc.pid, signal.SIGTERM)
                 proc.wait(timeout=8)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    proc.kill()
                 proc.wait(timeout=3)
             except Exception:
                 try:
-                    proc.kill()
+                    os.killpg(proc.pid, signal.SIGKILL)
                 except Exception:
-                    pass
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
         if runtime_log.exists():
-            raw = runtime_log.read_text(encoding="utf-8", errors="replace")
-            write_text(runtime_log, truncate_log(raw))
+            shrink_runtime_log(runtime_log)
 
 
 if __name__ == "__main__":

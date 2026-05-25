@@ -118,7 +118,7 @@ User-facing flags hide internal plumbing:
 | `--target demo` | Case-appropriate demo run label for probe, fuzz, and fake-smoke cases |
 | `--mode smoke` | `smoke-fast` budget profile |
 | `--mode local` | `local-default` budget profile |
-| `--mode asan` | `asan-default` budget profile (ASan/UBSan builds when supported) |
+| `--mode asan` | `asan-default` budget profile (AddressSanitizer build when supported) |
 
 Methodology card selection is automatic for known cases unless `--card` is passed explicitly.
 
@@ -159,7 +159,7 @@ npm run contact -- pair <pre_job_id> <post_job_id>
 - Same resolved commit hash.
 - Either commit hash does not map to a known role for the case.
 - `case_id`, `test_card_id`, or `budget_profile` differ between the two jobs.
-- `sanitizers_used` differ between the two jobs (for example one side built with ASan/UBSan and the other without).
+- `sanitizers_used` differ between the two jobs (for example one side built with sanitizer instrumentation and the other without).
 - Embedded `frame-record.json` bytes differ between the two jobs.
 
 When refusal conditions are not triggered, `pair.json` is written. Its headline field, **`verdict_flip_demonstrated`**, is `true` only when all eight of these conditions hold:
@@ -177,7 +177,7 @@ If any one condition fails, `verdict_flip_demonstrated` is `false` and `pair.jso
 
 This is one firmware-driven runtime difference against one crafted frame. It is not vulnerability discovery and not a safety claim. The outcome comes from what PX4 actually does at runtime; the runner does not hardcode pre-patch as anomalous or post-patch as clean.
 
-**Producing a live `verdict_flip_demonstrated: true` pair requires verified PX4 builds at both commits on the local machine.** For the headline runtime flip on the bounds-test frame, use `budget_profile: "asan-default"` so PX4 is built with AddressSanitizer and UndefinedBehaviorSanitizer enabled; without sanitizers the pre-patch path may stay `runtime_clean` on both sides. Offline smoke uses `smoke-fast` budget which skips PX4 builds; in that mode the live pair reports `verdict_flip_demonstrated: false`. The pair tool's logic is proven against synthetic fixtures in offline smoke, including the `verdict_flip_demonstrated: true` true-path (with and without sanitizer metadata), refusal of every invalid pair composition (same role, same hash, unmapped role, case/card mismatch, budget mismatch, mixed sanitizers, frame mismatch), and bundle replay refusal when `pinned_inputs.sanitizers_used` does not match the local build manifest.
+**Producing a live `verdict_flip_demonstrated: true` pair requires verified PX4 builds at both commits on the local machine.** For the headline runtime flip on the bounds-test frame, use `budget_profile: "asan-default"` so PX4 is built with AddressSanitizer enabled; without sanitizers the pre-patch path may stay `runtime_clean` on both sides. Offline smoke uses `smoke-fast` budget which skips PX4 builds; in that mode the live pair reports `verdict_flip_demonstrated: false`. The pair tool's logic is proven against synthetic fixtures in offline smoke, including the `verdict_flip_demonstrated: true` true-path (with and without sanitizer metadata), refusal of every invalid pair composition (same role, same hash, unmapped role, case/card mismatch, budget mismatch, mixed sanitizers, frame mismatch), and bundle replay refusal when `pinned_inputs.sanitizers_used` does not match the local build manifest.
 
 ## Replayable evidence bundles
 
@@ -235,7 +235,7 @@ The runner writes a preflight report for build/runtime dependencies (git, cmake,
 
 ### PX4 BATTERY_STATUS runtime replay (`mavlink-battery-status-runtime-replay`)
 
-The runner resolves `target_commit` to a pinned PX4 hash, writes preflight, records the exact crafted frame bytes (`frame-record.json`, `frame-record.hex`), checks out PX4 at the resolved commit, builds or reuses `px4_sitl_default` when budget allows (`asan-default` enables ASan/UBSan via `px4_sitl_default_asan` on Linux or equivalent CMAKE sanitizer flags), boots headless PX4 SITL, waits for MAVLink, delivers the bounds-test frame via pymavlink, and observes whether PX4 stays up. `runtime_clean` means PX4 booted, the frame was delivered, and no crash, abnormal log markers, or sanitizer findings were observed in the observation window. `runtime_anomalous` means the frame was delivered but PX4 exited, logged abnormal markers, or ASan/UBSan reported findings (PX4 may still be running when only sanitizers fired — structural instrumentation evidence, not a crash-exit verdict). `runtime_unavailable` means prerequisites or a verified build manifest were missing. Binary provenance is enforced: the runner refuses to claim a commit association without a manifest-verified or freshly-built binary at that commit with matching `sanitizers_enabled` (`firmware_commit_proven` and `sanitizers_used` reflect this honestly).
+The runner resolves `target_commit` to a pinned PX4 hash, writes preflight, records the exact crafted frame bytes (`frame-record.json`, `frame-record.hex`), checks out PX4 at the resolved commit, builds or reuses `px4_sitl_default` when budget allows (`asan-default` enables AddressSanitizer via the documented PX4 build switch when available, with fallback sanitizer build paths recorded explicitly), boots headless PX4 SITL, waits for MAVLink, delivers the bounds-test frame via pymavlink, and observes whether PX4 stays up. `runtime_clean` means PX4 booted, the frame was delivered, and no crash, abnormal log markers, or sanitizer findings were observed in the observation window. `runtime_anomalous` means the frame was delivered but PX4 exited, logged abnormal markers, or sanitizer instrumentation reported findings (PX4 may still be running when only sanitizers fired — structural instrumentation evidence, not a crash-exit verdict). `runtime_unavailable` means prerequisites or a verified build manifest were missing. Binary provenance is enforced: the runner refuses to claim a commit association without a manifest-verified or freshly-built binary at that commit with matching `sanitizers_enabled` (`firmware_commit_proven` and `sanitizers_used` reflect this honestly).
 
 ### Fake-smoke (FTP path handling, vague telemetry claim)
 

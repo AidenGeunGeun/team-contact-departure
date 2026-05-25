@@ -15,13 +15,17 @@ export type OperatorEventType =
   | "assistant_text_delta"
   | "assistant_text_end"
   | "thinking_status"
+  | "thinking_delta"
+  | "thinking_end"
   | "tool_started"
   | "tool_updated"
   | "tool_completed"
   | "tool_failed"
   | "contact_cli"
   | "evidence_job_updated"
-  | "transcript_written";
+  | "transcript_written"
+  | "follow_up_queued"
+  | "session_aborted";
 
 export interface OperatorEvent {
   id: string;
@@ -44,6 +48,7 @@ export interface OperatorSessionState {
   model_fallback_message?: string;
   active_job_ids: string[];
   selected_job_id?: string;
+  follow_up_count?: number;
 }
 
 export type ContactCliOperation =

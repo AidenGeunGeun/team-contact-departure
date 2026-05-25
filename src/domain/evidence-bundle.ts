@@ -171,11 +171,11 @@ function buildReadme(manifest: BundleManifest): string {
     manifest.runner_kind === "px4-runtime-replay" &&
     manifest.recorded_result.outcome === "runtime_anomalous" &&
     (pinnedSanitizers.length > 0 ||
-      /AddressSanitizer|UndefinedBehaviorSanitizer|sanitizer findings/i.test(recordedSummary))
+      /AddressSanitizer|sanitizer findings/i.test(recordedSummary))
       ? [
           "## Sanitizer instrumentation",
           "",
-          "This run used ASan/UBSan-instrumented PX4 firmware (see `pinned_inputs.sanitizers_used` in `manifest.json`). The recorded `runtime_anomalous` outcome may reflect sanitizer findings in PX4 output while the process was still running — structural instrumentation evidence, not a crash-exit verdict, and not vulnerability discovery or a safety claim.",
+          "This run used sanitizer-instrumented PX4 firmware (see `pinned_inputs.sanitizers_used` in `manifest.json`). The recorded `runtime_anomalous` outcome may reflect sanitizer findings in PX4 output while the process was still running — structural instrumentation evidence, not a crash-exit verdict, and not vulnerability discovery or a safety claim.",
           "",
         ]
       : [];

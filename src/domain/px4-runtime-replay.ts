@@ -236,18 +236,21 @@ function px4Root(config: Px4RuntimeReplayConfig): string {
 export type SitlBuildMethod =
   | "px4_sitl_default"
   | "px4_sitl_default_asan"
+  | "px4_asan_make_var"
   | "cmake_flags_asan"
   | "cmake_flags_default";
 
 const BUILD_METHOD_BINARY_RELATIVE: Record<SitlBuildMethod, string> = {
   px4_sitl_default: "build/px4_sitl_default/bin/px4",
   px4_sitl_default_asan: "build/px4_sitl_default_asan/bin/px4",
+  px4_asan_make_var: "build/px4_sitl_default/bin/px4",
   cmake_flags_asan: "build/px4_sitl_default/bin/px4",
   cmake_flags_default: "build/px4_sitl_default/bin/px4",
 };
 
 const SANITIZER_BUILD_METHODS = new Set<SitlBuildMethod>([
   "px4_sitl_default_asan",
+  "px4_asan_make_var",
   "cmake_flags_asan",
 ]);
 
@@ -393,6 +396,26 @@ async function runPx4SitlBuild(
   }
 
   if (process.platform === "linux") {
+    await appendFile(setupLog, `Starting make px4_sitl_default PX4_ASAN=1 in ${root}\n`, "utf8");
+    const officialAsanResult = await runCommand("make", ["px4_sitl_default", "-j4", "PX4_ASAN=1"], {
+      cwd: root,
+      signal,
+      timeoutMs: budget.build_timeout_sec * 1000,
+      logPath: setupLog,
+    });
+    if (officialAsanResult.code === 0) {
+      return {
+        code: 0,
+        buildNote: "PX4 AddressSanitizer build via official PX4_ASAN=1 Makefile switch",
+        buildMethod: "px4_asan_make_var",
+      };
+    }
+    await appendFile(
+      setupLog,
+      `\nOfficial PX4_ASAN=1 build failed (exit ${officialAsanResult.code}); checking legacy px4_sitl_default_asan target.\n`,
+      "utf8",
+    );
+
     await appendFile(setupLog, `Starting make px4_sitl_default_asan in ${root}\n`, "utf8");
     const asanResult = await runCommand("make", ["px4_sitl_default_asan", "-j4"], {
       cwd: root,
@@ -403,7 +426,7 @@ async function runPx4SitlBuild(
     if (asanResult.code === 0) {
       return {
         code: 0,
-        buildNote: "PX4 sanitizer build via make px4_sitl_default_asan (ASan+UBSan)",
+        buildNote: "PX4 sanitizer build via make px4_sitl_default_asan",
         buildMethod: "px4_sitl_default_asan",
       };
     }
@@ -414,10 +437,10 @@ async function runPx4SitlBuild(
     );
   }
 
-  const sanitizerFlags = "-fsanitize=address,undefined";
+  const sanitizerFlags = "-fsanitize=address";
   await appendFile(
     setupLog,
-    `Starting make px4_sitl_default with CMAKE sanitizer flags (${sanitizerFlags}) in ${root}\n`,
+    `Starting make px4_sitl_default with fallback CMAKE sanitizer flags (${sanitizerFlags}) in ${root}\n`,
     "utf8",
   );
   const fallback = await runCommand(
@@ -437,7 +460,7 @@ async function runPx4SitlBuild(
   );
   return {
     code: fallback.code,
-    buildNote: `px4_sitl_default with CMAKE_C/CXX_FLAGS_INIT=${sanitizerFlags}`,
+    buildNote: `px4_sitl_default with fallback CMAKE_C/CXX_FLAGS_INIT=${sanitizerFlags}`,
     buildMethod: "cmake_flags_asan",
   };
 }
@@ -795,7 +818,7 @@ async function writeEvidenceSummary(
     lines.push(
       "## Sanitizer instrumentation",
       "",
-      "Runtime was classified as anomalous because AddressSanitizer/UndefinedBehaviorSanitizer reported findings in PX4 output after frame delivery. PX4 may not have exited; this is structural instrumentation evidence, not a crash-exit verdict, and not vulnerability discovery or a safety claim.",
+      "Runtime was classified as anomalous because sanitizer instrumentation reported findings in PX4 output after frame delivery. PX4 may not have exited; this is structural instrumentation evidence, not a crash-exit verdict, and not vulnerability discovery or a safety claim.",
       "",
     );
   }
@@ -1386,6 +1409,8 @@ export async function producePx4RuntimeReplayEvidence(
     String(budget.observation_sec),
     "--pymavlink-version",
     config.pymavlink_version,
+    "--build-method",
+    buildMethod ?? "unknown",
   ];
 
   let harnessResult: { stdout: string; stderr: string; code: number };
@@ -1485,7 +1510,7 @@ export async function producePx4RuntimeReplayEvidence(
     resolvedOutcome === "runtime_clean"
       ? `PX4 SITL runtime replay delivered the crafted BATTERY_STATUS frame using firmware with verified build manifest for ${resolvedHash}; PX4 remained running with no abnormal log markers or sanitizer findings.`
       : resolvedOutcome === "runtime_anomalous" && sanitizerFindings.length > 0
-        ? `PX4 SITL runtime replay reported AddressSanitizer/UndefinedBehaviorSanitizer findings after frame delivery against verified firmware for ${resolvedHash}. PX4 may still be running; this is structural instrumentation evidence surfaced by ASan/UBSan, not a crash-exit verdict. ${summary.error ?? "See observation-record.json and runtime.log."}`
+        ? `PX4 SITL runtime replay reported sanitizer findings after frame delivery against verified firmware for ${resolvedHash}. PX4 may still be running; this is structural instrumentation evidence, not a crash-exit verdict. ${summary.error ?? "See observation-record.json and runtime.log."}`
         : resolvedOutcome === "runtime_anomalous"
           ? `PX4 SITL runtime replay observed unexpected behavior after frame delivery against verified firmware for ${resolvedHash}: ${summary.error ?? "see observation-record.json and runtime.log"}.`
           : resolvedOutcome === "runtime_unavailable"

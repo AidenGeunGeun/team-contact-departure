@@ -89,13 +89,34 @@ const bashSummary = summarizeContactCli(
   { stdout: "Launched job-stub-cli-001\nstate: queued" },
 );
 assert.ok(bashSummary);
-assert.equal(bashSummary?.operation, "run");
-assert.equal(bashSummary?.job_id, "job-stub-cli-001");
-assert.deepEqual(extractJobIdsFromText("watch job-stub-cli-001"), ["job-stub-cli-001"]);
+  assert.equal(bashSummary?.operation, "run");
+  assert.equal(bashSummary?.job_id, "job-stub-cli-001");
+  assert.deepEqual(extractJobIdsFromText("watch job-stub-cli-001"), ["job-stub-cli-001"]);
+  const failedWatchSummary = summarizeContactCli(
+    { command: "npm run contact -- watch job-stub-cli-001" },
+    { details: { stdout: "", stderr: "job-stub-cli-001 failed: missing artifact" } },
+  );
+  assert.ok(
+    failedWatchSummary?.detail?.includes("missing artifact"),
+    "failed Contact CLI details must surface useful error text",
+  );
 
 process.env.CONTACT_OPERATOR_SMOKE_STUB = "1";
 const { server, url } = await startDashboardServer({ port: 0 });
 try {
+  const indexResponse = await fetch(`${url}/`);
+  assert.equal(indexResponse.status, 200, "operator index must be served");
+  const indexHtml = await indexResponse.text();
+  assert.ok(
+    indexHtml.includes('data-operator-ui="chat-first"'),
+    "operator index must be the rebuilt chat-first UI",
+  );
+  assert.ok(!indexHtml.includes("Operator UI reset in progress"), "operator index must not be the reset placeholder");
+  assert.ok(indexHtml.includes("/operator.js"), "operator index must load operator.js");
+
+  const artifactsResponse = await fetch(`${url}/artifacts.html`);
+  assert.equal(artifactsResponse.status, 404, "legacy artifact browser must not be served");
+
   const sseEventsPromise = collectOperatorSseEventTypes(url, OPERATOR_TIMEOUT_MS);
   const promptResponse = await fetch(`${url}/api/operator/prompt`, {
     method: "POST",
@@ -103,6 +124,8 @@ try {
     body: JSON.stringify({ prompt: "Operator smoke stub", stub: true }),
   });
   assert.equal(promptResponse.status, 202);
+  const busyNewSession = await fetch(`${url}/api/operator/new-session`, { method: "POST" });
+  assert.equal(busyNewSession.status, 409, "new session must be blocked while operator is running");
 
   const deadline = Date.now() + OPERATOR_TIMEOUT_MS;
   let completed = false;
@@ -124,6 +147,7 @@ try {
   assert.ok(sseEvents.includes("contact_cli"), "operator SSE must emit contact_cli");
   assert.ok(sseEvents.includes("evidence_job_updated"), "operator SSE must emit evidence_job_updated");
   assert.ok(sseEvents.includes("session_completed"), "operator SSE must emit session_completed");
+  assert.equal(sseEvents.includes("thinking_delta"), false, "operator SSE must not expose hidden thinking text");
 } finally {
   await new Promise<void>((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));

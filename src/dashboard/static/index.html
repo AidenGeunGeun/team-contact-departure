@@ -3,62 +3,127 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Contact Departure Operator UI Reset</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        --bg: #111318;
-        --panel: #191e27;
-        --line: #2c3543;
-        --text: #e8edf4;
-        --muted: #9aa5b6;
-        --accent: #7d9a82;
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      body {
-        margin: 0;
-        min-height: 100dvh;
-        display: grid;
-        place-items: center;
-        background:
-          radial-gradient(circle at 20% 15%, rgba(125, 154, 130, 0.16), transparent 28rem),
-          var(--bg);
-        color: var(--text);
-        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-
-      main {
-        width: min(720px, calc(100vw - 2rem));
-        padding: 2rem;
-        border: 1px solid var(--line);
-        border-radius: 18px;
-        background: var(--panel);
-      }
-
-      p {
-        color: var(--muted);
-        line-height: 1.55;
-      }
-
-      a {
-        color: var(--accent);
-      }
-    </style>
+    <title>Contact Departure Operator</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/operator.css" />
   </head>
   <body>
-    <main>
-      <p>Contact Departure</p>
-      <h1>Operator UI reset in progress</h1>
-      <p>
-        The previous browser operator surface was intentionally removed. The backend session and evidence APIs remain available while the frontend is rebuilt from scratch around a chat-first agent workspace.
-      </p>
-      <p>
-        Raw evidence artifacts remain available in the <a href="/artifacts.html">secondary artifact browser</a>.
-      </p>
-    </main>
+    <div id="operator-app" class="operator-app" data-operator-ui="chat-first" data-session="idle">
+      <header class="operator-header">
+        <h1 class="brand-title">Contact Departure</h1>
+        <div class="header-meta">
+          <button
+            id="session-sidebar-show"
+            type="button"
+            class="session-sidebar-show"
+            aria-label="Show sessions"
+            title="Show sessions"
+          >
+            Sessions
+          </button>
+          <span id="session-status" class="header-status" aria-live="polite">Ready</span>
+        </div>
+      </header>
+
+      <div id="session-notice" class="session-notice hidden" role="status"></div>
+
+      <div class="operator-main">
+        <aside id="session-sidebar" class="session-sidebar" aria-label="Sessions">
+          <div class="session-sidebar-head">
+            <h2 class="session-sidebar-title">Sessions</h2>
+            <div class="session-sidebar-actions">
+              <button
+                id="session-demo"
+                type="button"
+                class="session-demo"
+                title="Run the canonical parser-bounds stub demo"
+              >
+                Demo
+              </button>
+              <button id="new-session" type="button" class="session-new" title="Start a new chat">New</button>
+              <button
+                id="session-sidebar-hide"
+                type="button"
+                class="session-sidebar-hide"
+                aria-label="Hide sessions"
+                title="Hide sessions"
+              >
+                ‹
+              </button>
+            </div>
+          </div>
+          <nav id="session-list" class="session-list" aria-label="Session history"></nav>
+        </aside>
+
+        <div class="session-workspace">
+          <div class="session-stage">
+            <div id="inspector-backdrop" class="inspector-backdrop" aria-hidden="true"></div>
+            <section class="chat-column" aria-label="Agent session">
+              <div class="chat-scroll">
+                <div id="timeline" class="timeline" data-slot="session-turn-list" aria-live="polite">
+                  <div class="timeline-empty" data-component="session-empty">
+                    <p class="empty-eyebrow">Evidence operator</p>
+                    <h2 class="empty-title">Talk to the agent inside parser bounds</h2>
+                    <p class="empty-copy">
+                      Your prompt runs a Pi-backed session. Tool steps stream here; click an Evidence row to
+                      open verdicts, caveats, and artifacts in the sidebar.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  id="jump-bottom"
+                  type="button"
+                  class="jump-bottom"
+                  aria-label="Scroll to latest"
+                  hidden
+                >
+                  Latest
+                </button>
+              </div>
+            </section>
+
+            <aside id="inspector" class="inspector" aria-label="Evidence details" aria-hidden="true">
+              <div class="inspector-head">
+                <div class="inspector-head-copy">
+                  <h2 id="inspector-title">Evidence</h2>
+                  <p id="inspector-subtitle" class="mono"></p>
+                </div>
+                <button id="inspector-close" class="inspector-close" type="button" aria-label="Close">×</button>
+              </div>
+              <div id="inspector-body" class="inspector-body"></div>
+            </aside>
+          </div>
+
+          <footer class="composer" aria-label="Prompt">
+            <div class="composer-shell" data-component="prompt-input-shell">
+              <textarea
+                id="prompt-input"
+                rows="1"
+                placeholder="Message Contact Departure…"
+                aria-label="Message Contact Departure"
+              ></textarea>
+              <div class="composer-actions">
+                <button
+                  id="send-prompt"
+                  class="composer-primary"
+                  type="button"
+                  data-action="prompt-submit"
+                  aria-label="Send"
+                >
+                  ↑
+                </button>
+              </div>
+            </div>
+            <p id="composer-hint" class="composer-hint hidden"></p>
+          </footer>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/operator.js"></script>
   </body>
 </html>

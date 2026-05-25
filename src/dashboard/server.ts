@@ -583,12 +583,14 @@ async function handleOperatorApi(
   url: URL,
   response: ServerResponse,
 ): Promise<void> {
+  const isSafeSessionId = (value: string): boolean => /^[0-9a-fA-F-]{36}$/.test(value) || value === "operator-smoke-stub";
+  const isSafeJobId = (value: string): boolean => /^job-[0-9A-Za-z_-]+$/.test(value);
   if (url.pathname === "/api/operator/config" && request.method === "GET") {
     sendJson(response, 200, {
       product_name: "Contact Departure",
       demo_prompt: operatorDemoPrompt(),
       auth_recovery: AGENT_AUTH_INSTRUCTION,
-      stop_available: false,
+      stop_available: true,
     });
     return;
   }
@@ -614,12 +616,78 @@ async function handleOperatorApi(
     const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
     const prompt = typeof record.prompt === "string" ? record.prompt : "";
     const stub = record.stub === true || process.env.CONTACT_OPERATOR_SMOKE_STUB === "1";
-    const result = await operatorSessionManager.submitPrompt(prompt, { stub });
+    const fresh = record.fresh === true;
+    const result = await operatorSessionManager.submitPrompt(prompt, { stub, fresh });
     if (!result.accepted) {
       sendJson(response, 409, { error: result.reason ?? "not_accepted", state: operatorSessionManager.getState() });
       return;
     }
     sendJson(response, 202, { accepted: true, state: operatorSessionManager.getState() });
+    return;
+  }
+
+  if (url.pathname === "/api/operator/sessions" && request.method === "GET") {
+    sendJson(response, 200, {
+      sessions: operatorSessionManager.listSessions(),
+      state: operatorSessionManager.getState(),
+    });
+    return;
+  }
+
+  const sessionEventsMatch = url.pathname.match(/^\/api\/operator\/sessions\/([^/]+)\/events$/);
+  if (sessionEventsMatch && request.method === "GET") {
+    const sessionId = decodeURIComponent(sessionEventsMatch[1] ?? "");
+    if (!isSafeSessionId(sessionId)) {
+      sendJson(response, 400, { error: "invalid_session_id" });
+      return;
+    }
+    sendJson(response, 200, {
+      session_id: sessionId,
+      events: operatorSessionManager.getSessionEvents(sessionId),
+    });
+    return;
+  }
+
+  const sessionDeleteMatch = url.pathname.match(/^\/api\/operator\/sessions\/([^/]+)$/);
+  if (sessionDeleteMatch && request.method === "DELETE") {
+    const sessionId = decodeURIComponent(sessionDeleteMatch[1] ?? "");
+    if (!isSafeSessionId(sessionId)) {
+      sendJson(response, 400, { error: "invalid_session_id" });
+      return;
+    }
+    const result = operatorSessionManager.deleteSession(sessionId);
+    if (!result.deleted) {
+      const status = result.reason === "session_busy" ? 409 : 404;
+      sendJson(response, status, {
+        error: result.reason ?? "not_deleted",
+        state: operatorSessionManager.getState(),
+      });
+      return;
+    }
+    sendJson(response, 200, {
+      deleted: true,
+      session_id: sessionId,
+      state: operatorSessionManager.getState(),
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/operator/new-session" && request.method === "POST") {
+    if (operatorSessionManager.isBusy()) {
+      sendJson(response, 409, { error: "session_busy", state: operatorSessionManager.getState() });
+      return;
+    }
+    sendJson(response, 200, { state: operatorSessionManager.startNewChat() });
+    return;
+  }
+
+  if (url.pathname === "/api/operator/stop" && request.method === "POST") {
+    const result = await operatorSessionManager.abortSession();
+    if (!result.aborted) {
+      sendJson(response, 409, { error: result.reason ?? "not_running", state: operatorSessionManager.getState() });
+      return;
+    }
+    sendJson(response, 200, { aborted: true, state: operatorSessionManager.getState() });
     return;
   }
 
@@ -633,6 +701,10 @@ async function handleOperatorApi(
     }
     const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
     const jobId = typeof record.job_id === "string" ? record.job_id : undefined;
+    if (jobId !== undefined && !isSafeJobId(jobId)) {
+      sendJson(response, 400, { error: "invalid_job_id" });
+      return;
+    }
     operatorSessionManager.selectJob(jobId);
     sendJson(response, 200, { ok: true, state: operatorSessionManager.getState() });
     return;
@@ -780,8 +852,8 @@ async function requestHandler(request: IncomingMessage, response: ServerResponse
     }
 
     if (url.pathname.startsWith("/api/operator/")) {
-      if (request.method !== "GET" && request.method !== "POST") {
-        sendMethodNotAllowed(response, "GET, POST");
+      if (request.method !== "GET" && request.method !== "POST" && request.method !== "DELETE") {
+        sendMethodNotAllowed(response, "GET, POST, DELETE");
         return;
       }
       await handleOperatorApi(request, url, response);

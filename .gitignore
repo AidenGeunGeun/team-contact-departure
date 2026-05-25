@@ -51,6 +51,7 @@ logs/
 # and are tracked explicitly.
 /runs/
 /agent-runs/
+/agent-judgments/
 /pairs/
 /bundles/
 /tmp/

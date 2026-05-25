@@ -37,7 +37,7 @@
       "replay_timeout_sec": 120,
       "heartbeat_timeout_sec": 60,
       "observation_sec": 15,
-      "sanitizers_enabled": ["asan", "ubsan"]
+      "sanitizers_enabled": ["asan"]
     }
   }
 }

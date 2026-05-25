@@ -735,7 +735,11 @@ if (replayComplete.details.state === "succeeded") {
     const setupLog = readFileSync(setupLogPath, "utf8");
     if (!replayManifestProvesPostPatch) {
       assert.equal(
-        setupLog.includes("Build skipped") || setupLog.includes("no build manifest") || setupLog.includes("unverified"),
+        setupLog.includes("Build skipped") ||
+          setupLog.includes("no build manifest") ||
+          setupLog.includes("unverified") ||
+          setupLog.includes("Failed to fetch commit") ||
+          setupLog.includes("git checkout failed"),
         true,
         "px4-setup.log should explain missing or unverified build provenance",
       );
