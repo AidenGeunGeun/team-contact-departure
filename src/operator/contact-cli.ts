@@ -80,7 +80,7 @@ function operationTitle(operation: ContactCliOperation, tail: string[]): string 
     case "pair":
       return `Compare jobs ${tail[1] ?? ""} and ${tail[2] ?? ""}`.trim();
     case "bundle":
-      return `Create bundle from ${tail[0] ?? "record"}`;
+      return `Create bundle from ${tail[1] ?? "record"}`;
     case "replay":
       return `Replay bundle ${tail[0] ?? ""}`.trim();
     default:

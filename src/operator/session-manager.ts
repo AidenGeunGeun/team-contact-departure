@@ -965,6 +965,51 @@ export class OperatorSessionManager {
     );
     await this.stubDelay(stepDelay);
 
+    await this.emitStubAssistantMessage(
+      recorder,
+      sessionId,
+      "First I’ll make the boundary explicit: the agent can plan, launch, watch, inspect, and summarize, but the runtime artifacts and replay record are the evidence source.",
+      { chunkSize: 18 },
+    );
+    await this.stubDelay(stepDelay);
+
+    const boundaryArgs = { command: "CONTACT_DEPARTURE_REMOTE_RUNTIME=stub npm run smoke:remote-runtime" };
+    recorder.recordToolStart("stub-boundary", "bash", boundaryArgs);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "tool_started",
+      payload: {
+        tool_call_id: "stub-boundary",
+        tool_name: "bash",
+        state: "running",
+        ...describeToolStart("bash", boundaryArgs),
+      },
+    });
+    await this.stubDelay(stepDelay);
+    recorder.recordToolEnd(
+      "stub-boundary",
+      "bash",
+      { stdout: "remote runtime mode: stub\nbridge: available\njob contract: runs/<job_id>\nsmoke:remote-runtime passed" },
+      false,
+    );
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "tool_completed",
+      payload: {
+        tool_call_id: "stub-boundary",
+        tool_name: "bash",
+        state: "completed",
+        ...describeToolEnd("bash", boundaryArgs, {
+          stdout: "remote runtime mode: stub\nbridge: available\njob contract: runs/<job_id>\nsmoke:remote-runtime passed",
+        }),
+      },
+    });
+    await this.stubDelay(stepDelay);
+
     const casesArgs = { command: "npm run contact -- cases" };
     recorder.recordToolStart("stub-cases", "bash", casesArgs);
     this.emit({
@@ -1006,6 +1051,14 @@ export class OperatorSessionManager {
       recorder,
       sessionId,
       "The mavlink-battery-status-runtime-replay case is the right proof path here: pinned pre/post commits, crafted BATTERY_STATUS frame delivery, and durable runtime artifacts on a Linux PX4 host.",
+      { chunkSize: 18 },
+    );
+    await this.stubDelay(stepDelay);
+
+    await this.emitStubAssistantMessage(
+      recorder,
+      sessionId,
+      "I’m deliberately not treating this as a vulnerability-discovery task. I’m narrowing to one claim, one methodology, one target commit, and one bounded runtime observation.",
       { chunkSize: 18 },
     );
     await this.stubDelay(stepDelay);
@@ -1089,6 +1142,47 @@ export class OperatorSessionManager {
         output_preview: showEnd.output_preview,
       },
     });
+
+    await this.emitStubAssistantMessage(
+      recorder,
+      sessionId,
+      "Before launch, I’ll check for active local jobs so the result I report is tied to this run, not a stale artifact from earlier testing.",
+      { chunkSize: 18 },
+    );
+    await this.stubDelay(stepDelay);
+
+    const jobsArgs = { command: "npm run contact -- jobs" };
+    recorder.recordToolStart("stub-jobs", "bash", jobsArgs);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "contact_cli",
+      payload: {
+        tool_call_id: "stub-jobs",
+        ...summarizeContactCli(jobsArgs)!,
+        state: "running",
+        command: asCommand(jobsArgs),
+        display_mode: "bash",
+      },
+    });
+    await this.stubDelay(stepDelay);
+    recorder.recordToolEnd("stub-jobs", "bash", { stdout: "No active runtime replay jobs." }, false);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "contact_cli",
+      payload: {
+        tool_call_id: "stub-jobs",
+        ...summarizeContactCli(jobsArgs, { stdout: "No active runtime replay jobs." })!,
+        state: "completed",
+        command: asCommand(jobsArgs),
+        display_mode: "bash",
+        output_preview: "No active runtime replay jobs.",
+      },
+    });
+    await this.stubDelay(stepDelay);
 
     const runArgs = {
       command: "npm run contact -- run mavlink-battery-status-runtime-replay --target post --mode smoke",
@@ -1178,6 +1272,78 @@ export class OperatorSessionManager {
       payload: {
         tool_call_id: "stub-3",
         ...summarizeContactCli(watchArgs, {
+          stdout: "job-stub-operator-001 · running · remote_sync_outbound · 22%",
+        })!,
+        state: "running",
+        command: asCommand(watchArgs),
+        display_mode: "bash",
+        output_preview: "job-stub-operator-001 · running · remote_sync_outbound · 22%",
+      },
+    });
+    await this.stubDelay(stepDelay);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "evidence_job_updated",
+      payload: {
+        job_id: "job-stub-operator-001",
+        state: "running",
+        phase: "remote_sync_outbound",
+        progress: 22,
+        runner_kind: "px4-runtime-replay",
+        execution_host: "pod-ubuntu20-stub",
+        case_id: "mavlink-battery-status-runtime-replay",
+        case_title: "MAVLink battery status runtime replay",
+        terminal: false,
+        stub: true,
+      },
+    });
+    await this.stubDelay(stepDelay);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "contact_cli",
+      payload: {
+        tool_call_id: "stub-3",
+        ...summarizeContactCli(watchArgs, {
+          stdout: "job-stub-operator-001 · running · remote_launching_runner · 30%",
+        })!,
+        state: "running",
+        command: asCommand(watchArgs),
+        display_mode: "bash",
+        output_preview: "job-stub-operator-001 · running · remote_launching_runner · 30%",
+      },
+    });
+    await this.stubDelay(stepDelay);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "evidence_job_updated",
+      payload: {
+        job_id: "job-stub-operator-001",
+        state: "running",
+        phase: "remote_launching_runner",
+        progress: 30,
+        runner_kind: "px4-runtime-replay",
+        execution_host: "pod-ubuntu20-stub",
+        case_id: "mavlink-battery-status-runtime-replay",
+        case_title: "MAVLink battery status runtime replay",
+        terminal: false,
+        stub: true,
+      },
+    });
+    await this.stubDelay(stepDelay);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "contact_cli",
+      payload: {
+        tool_call_id: "stub-3",
+        ...summarizeContactCli(watchArgs, {
           stdout: "job-stub-operator-001 · running · runtime-replay · 42%",
         })!,
         state: "running",
@@ -1191,12 +1357,65 @@ export class OperatorSessionManager {
       id: nextEventId(),
       session_id: sessionId,
       timestamp: nowIso(),
+      type: "contact_cli",
+      payload: {
+        tool_call_id: "stub-3",
+        ...summarizeContactCli(watchArgs, {
+          stdout: "job-stub-operator-001 · running · px4_setup · 55%",
+        })!,
+        state: "running",
+        command: asCommand(watchArgs),
+        display_mode: "bash",
+        output_preview: "job-stub-operator-001 · running · px4_setup · 55%",
+      },
+    });
+    await this.stubDelay(stepDelay);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
       type: "evidence_job_updated",
       payload: {
         job_id: "job-stub-operator-001",
         state: "running",
         phase: "runtime-replay",
         progress: 42,
+        runner_kind: "px4-runtime-replay",
+        execution_host: "pod-ubuntu20-stub",
+        case_id: "mavlink-battery-status-runtime-replay",
+        case_title: "MAVLink battery status runtime replay",
+        terminal: false,
+        stub: true,
+      },
+    });
+    await this.stubDelay(stepDelay);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "contact_cli",
+      payload: {
+        tool_call_id: "stub-3",
+        ...summarizeContactCli(watchArgs, {
+          stdout: "job-stub-operator-001 · running · waiting_for_mavlink · 68%",
+        })!,
+        state: "running",
+        command: asCommand(watchArgs),
+        display_mode: "bash",
+        output_preview: "job-stub-operator-001 · running · waiting_for_mavlink · 68%",
+      },
+    });
+    await this.stubDelay(stepDelay);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "evidence_job_updated",
+      payload: {
+        job_id: "job-stub-operator-001",
+        state: "running",
+        phase: "waiting_for_mavlink",
+        progress: 68,
         runner_kind: "px4-runtime-replay",
         execution_host: "pod-ubuntu20-stub",
         case_id: "mavlink-battery-status-runtime-replay",
@@ -1252,6 +1471,42 @@ export class OperatorSessionManager {
         state: "running",
         phase: "delivering_frame",
         progress: 78,
+        runner_kind: "px4-runtime-replay",
+        execution_host: "pod-ubuntu20-stub",
+        case_id: "mavlink-battery-status-runtime-replay",
+        case_title: "MAVLink battery status runtime replay",
+        terminal: false,
+        stub: true,
+      },
+    });
+    await this.stubDelay(stepDelay);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "contact_cli",
+      payload: {
+        tool_call_id: "stub-3",
+        ...summarizeContactCli(watchArgs, {
+          stdout: "job-stub-operator-001 · running · remote_sync_artifacts · 96%",
+        })!,
+        state: "running",
+        command: asCommand(watchArgs),
+        display_mode: "bash",
+        output_preview: "job-stub-operator-001 · running · remote_sync_artifacts · 96%",
+      },
+    });
+    await this.stubDelay(stepDelay);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "evidence_job_updated",
+      payload: {
+        job_id: "job-stub-operator-001",
+        state: "running",
+        phase: "remote_sync_artifacts",
+        progress: 96,
         runner_kind: "px4-runtime-replay",
         execution_host: "pod-ubuntu20-stub",
         case_id: "mavlink-battery-status-runtime-replay",
@@ -1394,9 +1649,97 @@ export class OperatorSessionManager {
     }
     await this.stubDelay(stepDelay);
 
+    await this.emitStubAssistantMessage(
+      recorder,
+      sessionId,
+      "The artifacts are inspectable locally now. I’ll create a replay package and run a replay check so the digest points to something stronger than my own summary.",
+      { chunkSize: 18 },
+    );
+    await this.stubDelay(stepDelay);
+
+    const bundleArgs = { command: "npm run contact -- bundle job-stub-operator-001" };
+    recorder.recordToolStart("stub-bundle", "bash", bundleArgs);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "contact_cli",
+      payload: {
+        tool_call_id: "stub-bundle",
+        ...summarizeContactCli(bundleArgs)!,
+        state: "running",
+        command: asCommand(bundleArgs),
+        display_mode: "bash",
+      },
+    });
+    await this.stubDelay(stepDelay);
+    recorder.recordToolEnd(
+      "stub-bundle",
+      "bash",
+      { stdout: "Created evidence bundle bundle-stub-runtime-001\nReplay kind: full" },
+      false,
+    );
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "contact_cli",
+      payload: {
+        tool_call_id: "stub-bundle",
+        ...summarizeContactCli(bundleArgs, {
+          stdout: "Created evidence bundle bundle-stub-runtime-001\nReplay kind: full",
+        })!,
+        state: "completed",
+        command: asCommand(bundleArgs),
+        display_mode: "bash",
+        output_preview: "Created evidence bundle bundle-stub-runtime-001 · Replay kind: full",
+      },
+    });
+    await this.stubDelay(stepDelay);
+
+    const replayArgs = { command: "npm run replay -- bundles/bundle-stub-runtime-001" };
+    recorder.recordToolStart("stub-replay", "bash", replayArgs);
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "contact_cli",
+      payload: {
+        tool_call_id: "stub-replay",
+        ...summarizeContactCli(replayArgs)!,
+        state: "running",
+        command: asCommand(replayArgs),
+        display_mode: "bash",
+      },
+    });
+    await this.stubDelay(stepDelay);
+    recorder.recordToolEnd(
+      "stub-replay",
+      "bash",
+      { stdout: "Bundle: bundle-stub-runtime-001\nRederived verdict: pair_record_valid\nPASS" },
+      false,
+    );
+    this.emit({
+      id: nextEventId(),
+      session_id: sessionId,
+      timestamp: nowIso(),
+      type: "contact_cli",
+      payload: {
+        tool_call_id: "stub-replay",
+        ...summarizeContactCli(replayArgs, {
+          stdout: "Bundle: bundle-stub-runtime-001\nRederived verdict: pair_record_valid\nPASS",
+        })!,
+        state: "completed",
+        command: asCommand(replayArgs),
+        display_mode: "bash",
+        output_preview: "Replay PASS · bundled evidence record verified",
+      },
+    });
+    await this.stubDelay(stepDelay);
+
     const judgmentArgs = {
       command:
-        "cat > agent-judgments/mavlink-battery-status-runtime-replay-demo.md <<'EOF'\nPX4 runtime replay review: runtime_clean at stub-commit-post-patch with frame delivered; runtime caveats apply.\nEOF",
+        "cat > agent-judgments/mavlink-battery-status-runtime-replay-demo.md <<'EOF'\nPX4 runtime replay review: runtime_clean at stub-commit-post-patch with frame delivered; bundle replay passed; runtime caveats apply.\nEOF",
     };
     recorder.recordToolStart("stub-4", "bash", judgmentArgs);
     this.emit({
@@ -1449,6 +1792,7 @@ export class OperatorSessionManager {
       "**Frame delivered:** yes",
       "**Commit proven:** yes",
       "**Resolved commit:** `stub-commit-post-patch`",
+      "**Replay check:** bundle replay PASS (simulated)",
       "",
       "**Artifacts:**",
       "- `runs/job-stub-operator-001/artifacts/evidence-summary.md`",
