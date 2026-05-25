@@ -7,6 +7,15 @@ export const CANONICAL_DEMO_PROMPT = [
   "Write a brief analyst judgment under agent-judgments/. Speak cautiously in terms of evidence gathered in this run. Make clear this is static-source evidence at a pinned PX4 commit, not SITL, fuzzing, or runtime MAVLink replay, and do not claim firmware is safe or unsafe.",
 ].join(" ");
 
+export const REMOTE_RUNTIME_OPERATOR_DEMO_PROMPT = [
+  "Validate the PX4 BATTERY_STATUS runtime replay evidence for the pinned post-patch firmware and explain what the result means.",
+  "Use `npm run contact -- cases` and `npm run contact -- show mavlink-battery-status-runtime-replay` to read the case and recommended commands.",
+  "Launch an evidence job with `npm run contact -- run mavlink-battery-status-runtime-replay --target post --mode smoke`.",
+  "Watch the job with `npm run contact -- watch <job_id>` until it reaches a terminal state, reporting the job id and concise progress updates along the way.",
+  "Inspect the job result and artifacts under runs/, then summarize what was tested, what evidence was observed, artifact/provenance support, caveats, and what a human reviewer should check next.",
+  "Write a brief analyst judgment under agent-judgments/. Separate evidence from interpretation. Do not claim firmware safety, certification, or vulnerability proof.",
+].join(" ");
+
 export const PX4_SITL_PROBE_DEMO_PROMPT = [
   "Evaluate the PX4 SITL runtime probe case for Contact Departure.",
   "Use `npm run contact -- show px4-runtime-probe` to read the case and recommended commands.",

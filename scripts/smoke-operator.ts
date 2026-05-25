@@ -101,7 +101,15 @@ assert.ok(bashSummary);
     "failed Contact CLI details must surface useful error text",
   );
 
-process.env.CONTACT_OPERATOR_SMOKE_STUB = "1";
+  const replaySummary = summarizeContactCli(
+    { command: "npm run replay -- bundles/demo-bundle" },
+    { stdout: "Replay PASS\nVerdict not re-derived; bundled record verified." },
+  );
+  assert.ok(replaySummary);
+  assert.equal(replaySummary?.operation, "replay");
+  assert.match(replaySummary?.title ?? "", /Replay bundle/);
+
+  process.env.CONTACT_OPERATOR_SMOKE_STUB = "1";
 const { server, url } = await startDashboardServer({ port: 0 });
 try {
   const indexResponse = await fetch(`${url}/`);

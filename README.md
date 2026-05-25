@@ -24,12 +24,13 @@ That contract is enforceable in code, not just claimed in slides.
 8. [Replayable evidence bundles](#replayable-evidence-bundles)
 9. [Per-runner detail](#per-runner-detail)
 10. [Dashboard](#dashboard)
-11. [Folder contract](#folder-contract)
-12. [Commands reference](#commands-reference)
-13. [Full reviewer walkthrough](#full-reviewer-walkthrough)
-14. [Repository map](#repository-map)
-15. [Limitations and environment requirements](#limitations-and-environment-requirements)
-16. [Deliberately out of scope](#deliberately-out-of-scope)
+11. [Remote runtime operator](#remote-runtime-operator)
+12. [Folder contract](#folder-contract)
+13. [Commands reference](#commands-reference)
+14. [Full reviewer walkthrough](#full-reviewer-walkthrough)
+15. [Repository map](#repository-map)
+16. [Limitations and environment requirements](#limitations-and-environment-requirements)
+17. [Deliberately out of scope](#deliberately-out-of-scope)
 
 ## What this proves and does not claim
 
@@ -268,6 +269,51 @@ Pages:
 
 The dashboard does not run replay. Visual polish is intentionally functional; the goal is honest information density.
 
+## Remote runtime operator
+
+Supplier evidence review is operationally difficult because validation methods live in different environments and produce fragmented artifacts. Contact Departure's answer is not "bolt an LLM onto tools." The agent has autonomy over orchestration, monitoring, and triage; the runtime boundary, durable artifacts, provenance, replay, and human review constrain what can be claimed.
+
+The remote runtime operator slice demonstrates that contract for PX4 BATTERY_STATUS runtime replay:
+
+1. **Agent as evidence operator** — reads the case, launches `npm run contact -- run mavlink-battery-status-runtime-replay ...`, watches progress, inspects artifacts, and writes a digest that separates evidence from interpretation.
+2. **Runtime as evidence generator** — PX4 on a prepared Linux pod executes the pinned replay methodology and writes `frame-record.*`, `delivery-record.json`, `runtime.log`, and related artifacts.
+3. **Replay/provenance/human review as authority** — the agent does not certify firmware safety. A clean runtime observation is one bounded evidence state, not proof of absence.
+
+### Enabling pod-backed dispatch
+
+Remote dispatch is opt-in via environment variables (never commit secrets or pod auth material):
+
+```bash
+export CONTACT_DEPARTURE_REMOTE_RUNTIME=1
+export CONTACT_DEPARTURE_REMOTE_SSH=reviewer@your-runpod-host
+export CONTACT_DEPARTURE_REMOTE_REPO=/workspace/Airbus-FYI
+# optional:
+# export CONTACT_DEPARTURE_REMOTE_SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=15"
+# export CONTACT_DEPARTURE_REMOTE_NODE=/usr/bin/node
+```
+
+With remote runtime enabled, `px4-runtime-replay` jobs still use the same local Contact CLI and `runs/<job_id>/` contract. A local bridge process syncs the job folder to the pod, launches `src/runners/px4-runtime-replay-runner.ts` remotely, mirrors status/events locally, and pulls back bounded artifacts listed in `result.json`.
+
+Use `CONTACT_DEPARTURE_REMOTE_RUNTIME=stub` for local development without SSH: execution metadata is tagged as remote-stub while the replay runner executes locally.
+
+Remote failures are first-class evidence states: `remote_connection_failed`, `remote_setup_failed`, `remote_runner_launch_failed`, and `remote_sync_failed` are recorded in job status/artifacts with explicit caveats — they are not hidden as generic product errors.
+
+### Browser operator
+
+`npm run dashboard` serves a chat-first operator UI at `/` that streams agent activity, Contact CLI cards, evidence job progress, inspector details (runtime outcome, frame delivery, commit provenance, execution host), and transcript links. Stub mode (`CONTACT_OPERATOR_SMOKE_STUB=1`) exercises the runtime-replay-facing UI without live Pi or Runpod billing.
+
+### Reviewer walkthrough (remote runtime)
+
+1. Prepare an Ubuntu 20.04 Linux pod with Node 22+, git, cmake, make, g++, Python 3, and a clone of this repository at `CONTACT_DEPARTURE_REMOTE_REPO`.
+2. Warm the PX4 cache on the pod if needed (first build is slow).
+3. On your laptop, export the remote runtime env vars above and run `npm run contact -- run mavlink-battery-status-runtime-replay --target post --mode local`.
+4. Watch with `npm run contact -- watch <job_id>` until terminal.
+5. Inspect `runs/<job_id>/result.json` and artifacts locally after sync.
+6. Optionally run `npm run dashboard`, prompt the operator with the runtime replay case, and confirm live cards show execution host, runtime outcome, and caveats.
+7. For pre/post comparison: launch pre and post jobs, `npm run contact -- pair <pre_job> <post_job>`, then bundle/replay as documented elsewhere.
+
+**Non-claim:** the agent does not certify firmware safety and does not replace security review.
+
 ## Folder contract
 
 ```text
@@ -295,7 +341,8 @@ agent-runs/<timestamp>/summary.json
 | --- | --- |
 | `npm run typecheck` | TypeScript compiles. |
 | `npm run smoke:offline` | Tool surface (Pi primitives, no legacy domain tools), project CLI checks, job lifecycle, all four real runners, fake runners, pair comparison (including refusal paths and synthetic `verdict_flip_demonstrated: true` fixtures), bundle creation and replay (including mismatch/tamper FAIL fixtures), cancellation, and artifacts work without model calls. |
-| `npm run smoke:operator` | Agent transcript/report formatting works without model calls. |
+| `npm run smoke:operator` | Browser operator stub SSE/rendering smoke for runtime replay cards (no live Pi). |
+| `npm run smoke:remote-runtime` | Remote runtime config parsing smoke (no SSH). |
 | `npm run smoke:dashboard` | Dashboard health, job detail, pair list and detail API, bundle list and detail pages, artifact fetch, traversal rejection, blocked mutation methods. |
 | `npm run contact -- help` | Project CLI help and command surface. |
 | `npm run contact -- cases` | List curated evidence cases in plain language. |
@@ -336,6 +383,7 @@ src/agent/                         agent operator run loop, transcript/report wr
 src/tools/evidence.ts              domain operation helpers (used by CLI and smoke tests)
 src/domain/catalog.ts              case and test-card loading
 src/domain/jobs.ts                 job lifecycle, run folders, runner dispatch, cancellation
+src/domain/remote-runtime.ts       pod-backed SSH/rsync seam for px4-runtime-replay jobs
 src/domain/static-source-evidence.ts   real PX4 static-source evidence
 src/domain/mavlink-parser-fuzz.ts      real pymavlink parser-library fuzz
 src/domain/px4-sitl-probe.ts          real PX4 SITL runtime probe (preflight helper also reused at replay time)
@@ -355,7 +403,8 @@ specs/                             ignored: planning specs (kept local for devel
 
 ## Limitations and environment requirements
 
-- **Live PX4 runtime requires local build environment.** `npm run smoke:offline` uses `smoke-fast` budget which skips PX4 builds and exercises the runtime-unavailable path stably. For `runtime_observed` from the SITL probe or `runtime_clean` from runtime replay, the machine needs Python 3, build tools (git, cmake, make, g++; ninja recommended), and either a prepared `.cache/px4/build/px4_sitl_default/bin/px4` with a matching build manifest or the bandwidth/time to fetch and build PX4 on first run.
+- **Live PX4 runtime requires local or pod-backed build environment.** `npm run smoke:offline` uses `smoke-fast` budget which skips PX4 builds and exercises the runtime-unavailable path stably. For `runtime_observed` from the SITL probe or `runtime_clean` from runtime replay, the machine (local or remote pod) needs Python 3, build tools (git, cmake, make, g++; ninja recommended), and either a prepared `.cache/px4/build/px4_sitl_default/bin/px4` with a matching build manifest or the bandwidth/time to fetch and build PX4 on first run.
+- **Remote runtime dispatch requires SSH/rsync access to a prepared pod clone.** The PoC does not create or delete Runpod pods automatically. Connection/setup/sync failures are recorded honestly in job artifacts.
 - **Live `verdict_flip_demonstrated: true` requires verified builds at both commits.** Use `asan-default` when you need sanitizer-instrumented runtime evidence; sanitizer builds are slower and are typically run on a Linux CPU host with a full PX4 toolchain. The pair tool's strict gate refuses to claim a flip without `firmware_commit_proven: true` on both sides, matching `sanitizers_used`, and meaningful runtime outcomes (not `runtime_unavailable`). Offline smoke does not run real ASan PX4 builds; synthetic fixtures prove the eight-condition gate and refusal paths. Producing a live true pair on instrumented firmware is an environment exercise (often a rented Linux CPU pod).
 - **Static-source replay needs network for the first PX4 fetch** unless `.cache/px4` is already warm. Subsequent replays of the same commit are offline.
 - **Parser-fuzz replay needs the local venv with the pinned pymavlink version.** Replay refuses with both versions named if the installed pymavlink differs from `pinned_inputs.pymavlink_version`.

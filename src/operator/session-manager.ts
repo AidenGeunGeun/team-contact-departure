@@ -3,7 +3,7 @@ import type { ServerResponse } from "node:http";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { AGENT_AUTH_INSTRUCTION, isAuthErrorMessage } from "../agent/run.js";
 import { AgentRunRecorder } from "../agent/transcript.js";
-import { CANONICAL_DEMO_PROMPT } from "../agent/prompts.js";
+import { REMOTE_RUNTIME_OPERATOR_DEMO_PROMPT } from "../agent/prompts.js";
 import { createContactDepartureSession } from "../session.js";
 import { inspectJob } from "../domain/jobs.js";
 import { asCommand, extractJobIdsFromText, summarizeContactCli } from "./contact-cli.js";
@@ -424,6 +424,8 @@ export class OperatorSessionManager {
           phase: detail.phase,
           progress: detail.progress,
           verdict: detail.result?.verdict,
+          outcome: detail.result?.px4_runtime_replay?.outcome,
+          frame_delivered: detail.result?.px4_runtime_replay?.frame_delivered,
         });
         if (this.lastJobSnapshot.get(jobId) === snapshot) {
           continue;
@@ -440,10 +442,14 @@ export class OperatorSessionManager {
             phase: detail.phase,
             progress: detail.progress,
             runner_kind: detail.runner?.type ?? detail.result?.runner_kind,
+            execution_host: detail.runner?.execution_host,
             verdict: detail.result?.verdict,
             confidence: detail.result?.confidence,
             summary: detail.result?.summary,
             caveats: detail.result?.cautions ?? [],
+            runtime_outcome: detail.result?.px4_runtime_replay?.outcome,
+            frame_delivered: detail.result?.px4_runtime_replay?.frame_delivered,
+            firmware_commit_proven: detail.result?.px4_runtime_replay?.firmware_commit_proven,
             resolved_commit_hash:
               detail.result?.static_source?.resolved_commit_hash ??
               detail.result?.px4_runtime_replay?.resolved_commit_hash,
@@ -954,7 +960,7 @@ export class OperatorSessionManager {
     await this.emitStubAssistantMessage(
       recorder,
       sessionId,
-      "I’ll handle this like an evidence operator: first identify the claim, then choose a bounded runner, then let artifacts decide what can be said.",
+      "I’ll operate this as a remote runtime evidence workflow: choose the PX4 BATTERY_STATUS replay case, launch through the project CLI, monitor the pod-backed runner, then let artifacts constrain what can be claimed.",
       { chunkSize: 18 },
     );
     await this.stubDelay(stepDelay);
@@ -999,15 +1005,15 @@ export class OperatorSessionManager {
     await this.emitStubAssistantMessage(
       recorder,
       sessionId,
-      "The parser-bounds case is the right starting point for a quick demo: narrow claim, pinned PX4 commits, and artifacts a reviewer can inspect.",
+      "The mavlink-battery-status-runtime-replay case is the right proof path here: pinned pre/post commits, crafted BATTERY_STATUS frame delivery, and durable runtime artifacts on a Linux PX4 host.",
       { chunkSize: 18 },
     );
     await this.stubDelay(stepDelay);
 
     const stubExplore = [
-      { id: "stub-e1", tool: "read", args: { path: "specs/mavlink-battery-status-bounds.md" } },
-      { id: "stub-e2", tool: "grep", args: { pattern: "BATTERY_STATUS", path: "src" } },
-      { id: "stub-e3", tool: "read", args: { path: "src/px4/parser/battery_status.cpp" } },
+      { id: "stub-e1", tool: "read", args: { path: "data/px4-runtime-replay.json" } },
+      { id: "stub-e2", tool: "grep", args: { pattern: "runtime_replay", path: "src/domain" } },
+      { id: "stub-e3", tool: "read", args: { path: "src/runners/px4-runtime-replay-harness.py" } },
       { id: "stub-e4", tool: "read", args: { path: "data/static-source-commits.json" } },
     ];
     for (const step of stubExplore) {
@@ -1044,12 +1050,12 @@ export class OperatorSessionManager {
     await this.emitStubAssistantMessage(
       recorder,
       sessionId,
-      "This maps to static-source evidence first. It will not certify runtime behavior, but it can verify whether the claimed patch structure is present at the pinned commit.",
+      "This is runtime replay evidence, not static source review. The agent can orchestrate launch and monitoring, but artifacts and replay remain the authority on what happened in PX4.",
       { chunkSize: 20 },
     );
     await this.stubDelay(stepDelay);
 
-    const showArgs = { command: "npm run contact -- show mavlink-battery-status-bounds" };
+    const showArgs = { command: "npm run contact -- show mavlink-battery-status-runtime-replay" };
     recorder.recordToolStart("stub-1", "bash", showArgs);
     const showContact = summarizeContactCli(showArgs)!;
     this.emit({
@@ -1085,7 +1091,7 @@ export class OperatorSessionManager {
     });
 
     const runArgs = {
-      command: "npm run contact -- run mavlink-battery-status-bounds --target post --mode smoke",
+      command: "npm run contact -- run mavlink-battery-status-runtime-replay --target post --mode smoke",
     };
     recorder.recordToolStart("stub-2", "bash", runArgs);
     const runContact = summarizeContactCli(runArgs)!;
@@ -1141,7 +1147,7 @@ export class OperatorSessionManager {
         state: "running",
         command: asCommand(watchArgs),
         display_mode: "bash",
-        output_preview: "job-stub-operator-001 · queued · resolving_commit · 18%",
+        output_preview: "job-stub-operator-001 · queued · remote_connecting · 12%",
       },
     });
     await this.stubDelay(stepDelay);
@@ -1153,11 +1159,12 @@ export class OperatorSessionManager {
       payload: {
         job_id: "job-stub-operator-001",
         state: "running",
-        phase: "resolving_commit",
-        progress: 18,
-        runner_kind: "static-source-evidence",
-        case_id: "mavlink-battery-status-bounds",
-        case_title: "MAVLink battery status parser bounds",
+        phase: "remote_connecting",
+        progress: 12,
+        runner_kind: "px4-runtime-replay",
+        execution_host: "pod-ubuntu20-stub",
+        case_id: "mavlink-battery-status-runtime-replay",
+        case_title: "MAVLink battery status runtime replay",
         terminal: false,
         stub: true,
       },
@@ -1171,12 +1178,12 @@ export class OperatorSessionManager {
       payload: {
         tool_call_id: "stub-3",
         ...summarizeContactCli(watchArgs, {
-          stdout: "job-stub-operator-001 · running · fetching_source · 42%",
+          stdout: "job-stub-operator-001 · running · runtime-replay · 42%",
         })!,
         state: "running",
         command: asCommand(watchArgs),
         display_mode: "bash",
-        output_preview: "job-stub-operator-001 · running · fetching_source · 42%",
+        output_preview: "job-stub-operator-001 · running · runtime-replay · 42%",
       },
     });
     await this.stubDelay(stepDelay);
@@ -1188,11 +1195,12 @@ export class OperatorSessionManager {
       payload: {
         job_id: "job-stub-operator-001",
         state: "running",
-        phase: "fetching_source",
+        phase: "runtime-replay",
         progress: 42,
-        runner_kind: "static-source-evidence",
-        case_id: "mavlink-battery-status-bounds",
-        case_title: "MAVLink battery status parser bounds",
+        runner_kind: "px4-runtime-replay",
+        execution_host: "pod-ubuntu20-stub",
+        case_id: "mavlink-battery-status-runtime-replay",
+        case_title: "MAVLink battery status runtime replay",
         terminal: false,
         stub: true,
       },
@@ -1206,12 +1214,12 @@ export class OperatorSessionManager {
       payload: {
         tool_call_id: "stub-3",
         ...summarizeContactCli(watchArgs, {
-          stdout: "job-stub-operator-001 · running · inspecting_source · 78%",
+          stdout: "job-stub-operator-001 · running · delivering_frame · 78%",
         })!,
         state: "running",
         command: asCommand(watchArgs),
         display_mode: "bash",
-        output_preview: "job-stub-operator-001 · running · inspecting_source · 78%",
+        output_preview: "job-stub-operator-001 · running · delivering_frame · 78%",
       },
     });
     await this.stubDelay(stepDelay);
@@ -1223,11 +1231,12 @@ export class OperatorSessionManager {
       payload: {
         job_id: "job-stub-operator-001",
         state: "running",
-        phase: "locating_function",
+        phase: "px4_setup",
         progress: 64,
-        runner_kind: "static-source-evidence",
-        case_id: "mavlink-battery-status-bounds",
-        case_title: "MAVLink battery status parser bounds",
+        runner_kind: "px4-runtime-replay",
+        execution_host: "pod-ubuntu20-stub",
+        case_id: "mavlink-battery-status-runtime-replay",
+        case_title: "MAVLink battery status runtime replay",
         terminal: false,
         stub: true,
       },
@@ -1241,11 +1250,12 @@ export class OperatorSessionManager {
       payload: {
         job_id: "job-stub-operator-001",
         state: "running",
-        phase: "inspecting_source",
+        phase: "delivering_frame",
         progress: 78,
-        runner_kind: "static-source-evidence",
-        case_id: "mavlink-battery-status-bounds",
-        case_title: "MAVLink battery status parser bounds",
+        runner_kind: "px4-runtime-replay",
+        execution_host: "pod-ubuntu20-stub",
+        case_id: "mavlink-battery-status-runtime-replay",
+        case_title: "MAVLink battery status runtime replay",
         terminal: false,
         stub: true,
       },
@@ -1259,11 +1269,12 @@ export class OperatorSessionManager {
       payload: {
         job_id: "job-stub-operator-001",
         state: "running",
-        phase: "checking_guard_order",
+        phase: "observing_runtime",
         progress: 91,
-        runner_kind: "static-source-evidence",
-        case_id: "mavlink-battery-status-bounds",
-        case_title: "MAVLink battery status parser bounds",
+        runner_kind: "px4-runtime-replay",
+        execution_host: "pod-ubuntu20-stub",
+        case_id: "mavlink-battery-status-runtime-replay",
+        case_title: "MAVLink battery status runtime replay",
         terminal: false,
         stub: true,
       },
@@ -1279,24 +1290,28 @@ export class OperatorSessionManager {
         state: "succeeded",
         phase: "completed",
         progress: 100,
-        runner_kind: "static-source-evidence",
-        case_id: "mavlink-battery-status-bounds",
-        case_title: "MAVLink battery status parser bounds",
-        verdict: "mitigation_observed",
+        runner_kind: "px4-runtime-replay",
+        execution_host: "pod-ubuntu20-stub",
+        case_id: "mavlink-battery-status-runtime-replay",
+        case_title: "MAVLink battery status runtime replay",
+        verdict: "manual_review_needed",
         confidence: "medium",
-        summary: "Static PX4 source inspection found the post-patch guard ordering consistent with the supplier-style mitigation claim.",
+        runtime_outcome: "runtime_clean",
+        frame_delivered: true,
+        firmware_commit_proven: true,
+        summary:
+          "PX4 runtime replay delivered the crafted BATTERY_STATUS frame on the pod-backed host and recorded a clean runtime observation at the pinned post-patch commit.",
         caveats: [
-          "Static-source evidence at a pinned PX4 commit only.",
-          "Not SITL, parser fuzzing, or runtime MAVLink replay.",
+          "One runtime replay observation at a pinned PX4 commit only.",
+          "Does not prove firmware safety or absence of vulnerabilities.",
           "Agent judgment is not firmware safety authority.",
         ],
         resolved_commit_hash: "stub-commit-post-patch",
-        pr_url: "https://github.com/PX4/PX4-Autopilot/pull/stub-demo",
         artifacts: [
           { name: "evidence-summary.md", type: "markdown" },
-          { name: "commit-info.json", type: "json" },
-          { name: "source-context.md", type: "markdown" },
-          { name: "diff-summary.md", type: "markdown" },
+          { name: "delivery-record.json", type: "json" },
+          { name: "frame-record.hex", type: "text" },
+          { name: "runtime.log", type: "text" },
         ],
         terminal: true,
         stub: true,
@@ -1343,10 +1358,10 @@ export class OperatorSessionManager {
     await this.stubDelay(stepDelay);
 
     const artifactReads = [
-      { id: "stub-r1", path: "runs/job-stub-operator-001/evidence-summary.md" },
-      { id: "stub-r2", path: "runs/job-stub-operator-001/commit-info.json" },
-      { id: "stub-r3", path: "runs/job-stub-operator-001/source-context.md" },
-      { id: "stub-r4", path: "runs/job-stub-operator-001/diff-summary.md" },
+      { id: "stub-r1", path: "runs/job-stub-operator-001/artifacts/evidence-summary.md" },
+      { id: "stub-r2", path: "runs/job-stub-operator-001/artifacts/delivery-record.json" },
+      { id: "stub-r3", path: "runs/job-stub-operator-001/artifacts/frame-record.hex" },
+      { id: "stub-r4", path: "runs/job-stub-operator-001/artifacts/runtime.log" },
     ];
     for (const step of artifactReads) {
       recorder.recordToolStart(step.id, "read", step);
@@ -1381,7 +1396,7 @@ export class OperatorSessionManager {
 
     const judgmentArgs = {
       command:
-        "cat > agent-judgments/mavlink-battery-status-bounds-demo.md <<'EOF'\nStatic-source parser-bounds review: mitigation_observed at stub-commit-post-patch, with runtime caveats.\nEOF",
+        "cat > agent-judgments/mavlink-battery-status-runtime-replay-demo.md <<'EOF'\nPX4 runtime replay review: runtime_clean at stub-commit-post-patch with frame delivered; runtime caveats apply.\nEOF",
     };
     recorder.recordToolStart("stub-4", "bash", judgmentArgs);
     this.emit({
@@ -1399,7 +1414,7 @@ export class OperatorSessionManager {
       },
     });
     await this.stubDelay(stepDelay);
-    recorder.recordToolEnd("stub-4", "bash", { stdout: "Wrote agent-judgments/mavlink-battery-status-bounds-demo.md" }, false);
+    recorder.recordToolEnd("stub-4", "bash", { stdout: "Wrote agent-judgments/mavlink-battery-status-runtime-replay-demo.md" }, false);
     this.emit({
       id: nextEventId(),
       session_id: sessionId,
@@ -1412,7 +1427,7 @@ export class OperatorSessionManager {
         state: "completed",
         command: asCommand(judgmentArgs),
         display_mode: "bash",
-        output_preview: "Wrote agent-judgments/mavlink-battery-status-bounds-demo.md",
+        output_preview: "Wrote agent-judgments/mavlink-battery-status-runtime-replay-demo.md",
       },
     });
     await this.stubDelay(stepDelay);
@@ -1425,31 +1440,32 @@ export class OperatorSessionManager {
       payload: {},
     });
     const answer = [
-      "## MAVLink battery status parser-bounds — demo result",
+      "## PX4 BATTERY_STATUS runtime replay — demo result",
       "",
       "**Job:** `job-stub-operator-001`",
-      "**Verdict:** mitigation_observed (medium confidence)",
-      "**Runner:** static-source-evidence",
+      "**Verdict:** manual_review_needed (medium confidence)",
+      "**Runner:** px4-runtime-replay on pod-ubuntu20-stub",
+      "**Runtime outcome:** runtime_clean",
+      "**Frame delivered:** yes",
+      "**Commit proven:** yes",
       "**Resolved commit:** `stub-commit-post-patch`",
-      "**Inspected:** `src/modules/mavlink/mavlink_messages.cpp` · `BatteryStatus::parse()` · lines 812–889",
-      "**PR:** https://github.com/PX4/PX4-Autopilot/pull/stub-demo",
       "",
       "**Artifacts:**",
-      "- `runs/job-stub-operator-001/evidence-summary.md`",
-      "- `runs/job-stub-operator-001/commit-info.json`",
-      "- `runs/job-stub-operator-001/source-context.md`",
-      "- `runs/job-stub-operator-001/diff-summary.md`",
+      "- `runs/job-stub-operator-001/artifacts/evidence-summary.md`",
+      "- `runs/job-stub-operator-001/artifacts/delivery-record.json`",
+      "- `runs/job-stub-operator-001/artifacts/frame-record.hex`",
+      "- `runs/job-stub-operator-001/artifacts/runtime.log`",
       "",
       "**Caveats:**",
-      "- Static-source evidence at a pinned PX4 commit only.",
-      "- Not SITL, parser fuzzing, or runtime MAVLink replay.",
+      "- One runtime replay observation at a pinned PX4 commit only.",
+      "- Does not prove firmware safety or absence of vulnerabilities.",
       "- Agent judgment is not firmware safety authority.",
       "",
-      "**Recommended next step:** Run PX4 SITL probe, parser-library fuzz, or the ASan runtime replay to corroborate runtime behavior.",
+      "**Recommended next step:** Pair pre/post replay jobs or run bundle replay if a flip claim is needed; human review still decides what the evidence supports.",
       "",
-      "Analyst judgment saved to `agent-judgments/mavlink-battery-status-bounds-demo.md`.",
+      "Analyst judgment saved to `agent-judgments/mavlink-battery-status-runtime-replay-demo.md`.",
       "",
-      "This demo stream is simulated; it shows the operator workflow without live Pi or real Contact jobs.",
+      "This demo stream is simulated; it shows the remote runtime operator workflow without live Pi, SSH, or real Contact jobs.",
     ].join("\n");
     await this.emitStubAssistantMessage(recorder, sessionId, answer, { chunkSize: 18 });
   }
@@ -1577,5 +1593,5 @@ function chunkText(text: string, size: number): string[] {
 export const operatorSessionManager = new OperatorSessionManager();
 
 export function operatorDemoPrompt(): string {
-  return CANONICAL_DEMO_PROMPT;
+  return REMOTE_RUNTIME_OPERATOR_DEMO_PROMPT;
 }

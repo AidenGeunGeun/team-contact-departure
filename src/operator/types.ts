@@ -61,6 +61,7 @@ export type ContactCliOperation =
   | "cancel"
   | "pair"
   | "bundle"
+  | "replay"
   | "unknown";
 
 export interface ContactCliSummary {

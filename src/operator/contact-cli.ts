@@ -81,6 +81,8 @@ function operationTitle(operation: ContactCliOperation, tail: string[]): string 
       return `Compare jobs ${tail[1] ?? ""} and ${tail[2] ?? ""}`.trim();
     case "bundle":
       return `Create bundle from ${tail[0] ?? "record"}`;
+    case "replay":
+      return `Replay bundle ${tail[0] ?? ""}`.trim();
     default:
       return "Contact CLI command";
   }
@@ -88,7 +90,22 @@ function operationTitle(operation: ContactCliOperation, tail: string[]): string 
 
 export function summarizeContactCli(args: unknown, result?: unknown): ContactCliSummary | undefined {
   const command = asCommand(args);
-  if (!command || !/(?:npm run )?contact\s+--/i.test(command)) {
+  if (!command) {
+    return undefined;
+  }
+
+  const replayMatch = command.match(/(?:npm run )?replay\s+--\s+(\S+)/i);
+  if (replayMatch) {
+    const bundlePath = replayMatch[1];
+    const resultText = asText(result);
+    return {
+      operation: "replay",
+      title: `Replay bundle ${bundlePath}`,
+      detail: resultText?.split("\n").slice(0, 2).join(" ").trim().slice(0, 180),
+    };
+  }
+
+  if (!/(?:npm run )?contact\s+--/i.test(command)) {
     return undefined;
   }
 

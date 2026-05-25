@@ -31,6 +31,7 @@ interface DashboardJobRecord {
   runner?: {
     type?: unknown;
     expected_duration_ms?: unknown;
+    execution_host?: unknown;
   };
 }
 
@@ -58,6 +59,7 @@ interface JobSnapshot {
   phase: string;
   progress: number;
   runner_kind?: string;
+  execution_host?: string;
   verdict?: string;
   verdict_kind?: string;
   resolved_commit_hash?: string;
@@ -305,6 +307,7 @@ function buildSnapshot(
     phase: status?.phase ?? "unknown",
     progress: Math.max(0, Math.min(100, asNumber(status?.progress, 0))),
     runner_kind: status?.runner?.type ?? result?.runner_kind ?? asString(record?.runner?.type),
+    execution_host: status?.runner?.execution_host ?? asString(record?.runner?.execution_host),
     verdict: result?.verdict,
     verdict_kind:
       result?.static_source?.verdict_kind ??

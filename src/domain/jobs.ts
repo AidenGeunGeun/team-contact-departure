@@ -37,6 +37,23 @@ import {
   type StaticSourceOutcome,
   type VerdictKind as StaticVerdictKind,
 } from "./static-source-evidence.js";
+import {
+  appendLocalEvent,
+  launchRemotePx4RuntimeReplayRunner,
+  loadRemoteRuntimeConfig,
+  localRunDirForJob,
+  remoteExecutionLabel,
+  remoteRuntimeMode,
+  shouldDispatchPx4ReplayRemotely,
+  signalRemoteProcess,
+  syncJobFolderToRemote,
+  syncRemoteArtifactsToLocal,
+  syncRemoteJobStateToLocal,
+  testRemoteConnection,
+  writeRemoteFailureArtifact,
+  type RemoteRuntimeConfig,
+  type RemoteRuntimeFailureStage,
+} from "./remote-runtime.js";
 
 export type JobState = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
@@ -185,17 +202,26 @@ export interface StaticSourceResultMetadata {
   failure_stage?: string;
 }
 
+export interface JobRunnerRemoteMetadata {
+  ssh_target: string;
+  remote_repo: string;
+  remote_pid?: number;
+  mode: "ssh" | "stub";
+}
+
 export interface JobRunnerProcessMetadata {
   pid: number;
   launched_at: string;
   entrypoint: string;
   detached: boolean;
   cancel_signal: "SIGTERM";
+  remote?: JobRunnerRemoteMetadata;
 }
 
 export interface JobRunnerMetadata {
   type: RunnerKind;
   expected_duration_ms: number;
+  execution_host?: string;
   process?: JobRunnerProcessMetadata;
 }
 
@@ -256,6 +282,12 @@ const PX4_RUNTIME_REPLAY_RUNNER_ENTRYPOINT = "src/runners/px4-runtime-replay-run
 const PX4_RUNTIME_REPLAY_RUNNER_SCRIPT_PATH = fileURLToPath(
   new URL("../runners/px4-runtime-replay-runner.ts", import.meta.url),
 );
+const REMOTE_PX4_RUNTIME_BRIDGE_ENTRYPOINT = "src/runners/remote-px4-runtime-bridge.ts";
+const REMOTE_PX4_RUNTIME_BRIDGE_SCRIPT_PATH = fileURLToPath(
+  new URL("../runners/remote-px4-runtime-bridge.ts", import.meta.url),
+);
+const REMOTE_RUNTIME_POLL_MS = 2500;
+const REMOTE_RUNTIME_MAX_WAIT_MS = 900_000;
 const RUNNER_CANCEL_SIGNAL = "SIGTERM" as const;
 const JOB_LOCK_DIR_NAME = ".state-lock";
 const JOB_FILE_LOCK_TIMEOUT_MS = 5000;
@@ -1796,9 +1828,321 @@ export async function runStandalonePx4RuntimeReplayJob(jobId: string): Promise<v
   }
 }
 
+async function completeRemoteBridgeFailure(
+  jobId: string,
+  stage: RemoteRuntimeFailureStage,
+  message: string,
+  config?: RemoteRuntimeConfig | null,
+): Promise<void> {
+  const paths = jobPaths(jobId);
+  await writeRemoteFailureArtifact(paths.artifactDirAbs, stage, message, config);
+  await appendEvent(jobId, {
+    timestamp: nowIso(),
+    state: "failed",
+    phase: stage,
+    progress: 100,
+    message,
+  });
+  await forceRemoteBridgeFailure(jobId, stage, message);
+}
+
+async function forceRemoteBridgeFailure(
+  jobId: string,
+  stage: RemoteRuntimeFailureStage,
+  message: string,
+): Promise<void> {
+  await withJobLock(jobId, async () => {
+    const current = await readStatus(jobId);
+    if (current.state === "cancelled") {
+      return;
+    }
+    const record = await readJobRecord(jobId);
+    const failedAt = nowIso();
+    const paths = jobPaths(jobId);
+    const artifactPaths = [
+      join(paths.artifactDirAbs, "remote-runtime-failure.json"),
+      join(paths.artifactDirAbs, "remote-runtime-failure.md"),
+    ]
+      .filter((pathName) => existsSync(pathName))
+      .map(relativeToRepo);
+    const result: EvidenceResult = {
+      job_id: jobId,
+      state: "failed",
+      verdict: "runner_failed",
+      confidence: "low",
+      summary: `The PX4 remote runtime bridge failed: ${stage}: ${message}`,
+      evidence_signals: [
+        {
+          name: "remote_runtime_failure_stage",
+          value: stage,
+          interpretation: "Remote runtime infrastructure failed before local artifact evidence could be trusted.",
+        },
+      ],
+      artifact_paths: artifactPaths,
+      cautions: [
+        "This is a remote runtime infrastructure/sync failure, not a firmware runtime observation.",
+        "This does not prove firmware safety or vulnerability discovery.",
+      ],
+      completed_at: failedAt,
+      runner_kind: current.runner?.type,
+      px4_runtime_replay: {
+        case_id: record.request.case_id,
+        test_card_id: record.request.test_card_id,
+        target_commit: record.request.target_commit,
+        resolved_commit_hash: "unknown",
+        failure_stage: stage,
+        pymavlink_version: "unknown",
+        python_version: "unknown",
+        mavlink_connection: "unknown",
+        frame_delivered: false,
+        firmware_commit_proven: false,
+        px4_binary_present: false,
+        budget_profile: record.request.budget_profile,
+        sanitizers_used: [],
+        sanitizer_findings: [],
+      },
+    };
+    await writeJson(paths.resultPath, result);
+    await writeStatus({
+      ...current,
+      state: "failed",
+      phase: stage,
+      progress: 100,
+      finished_at: failedAt,
+      updated_at: failedAt,
+      message: result.summary,
+    });
+  });
+}
+
+async function preserveRemoteBridgeMetadata(
+  jobId: string,
+  bridgeProcess: JobRunnerProcessMetadata | undefined,
+  config: RemoteRuntimeConfig,
+): Promise<void> {
+  if (!bridgeProcess) {
+    return;
+  }
+  await withJobLock(jobId, async () => {
+    const current = await readStatus(jobId);
+    if (!current.runner) {
+      return;
+    }
+    await writeStatus({
+      ...current,
+      runner: {
+        ...current.runner,
+        execution_host: remoteExecutionLabel(config),
+        process: bridgeProcess,
+      },
+      updated_at: nowIso(),
+    });
+  });
+}
+
+async function updateRemoteRunnerPid(jobId: string, remotePid: number): Promise<void> {
+  await withJobLock(jobId, async () => {
+    const current = await readStatus(jobId);
+    if (!current.runner?.process) {
+      return;
+    }
+    const updated: JobStatus = {
+      ...current,
+      runner: {
+        ...current.runner,
+        process: {
+          ...current.runner.process,
+          remote: current.runner.process.remote
+            ? { ...current.runner.process.remote, remote_pid: remotePid }
+            : undefined,
+        },
+      },
+      updated_at: nowIso(),
+    };
+    await writeStatus(updated);
+  });
+}
+
+export async function runRemotePx4RuntimeReplayBridge(jobId: string): Promise<void> {
+  assertSafeJobId(jobId);
+  const controller = new AbortController();
+  installRunnerSignalHandlers(jobId, {
+    kindLabel: "Remote PX4 runtime replay bridge",
+    onAbort: () => controller.abort(),
+  });
+
+  const config = loadRemoteRuntimeConfig();
+  const paths = jobPaths(jobId);
+  const mode = remoteRuntimeMode();
+
+  if (!config) {
+    await completeRemoteBridgeFailure(
+      jobId,
+      "remote_runtime_unconfigured",
+      "Remote runtime is enabled but CONTACT_DEPARTURE_REMOTE_SSH and CONTACT_DEPARTURE_REMOTE_REPO are not set.",
+    );
+    return;
+  }
+
+  try {
+    if (await shouldStopRunner(jobId)) {
+      return;
+    }
+
+    await updateStatus(jobId, {
+      state: "running",
+      phase: mode === "stub" ? "remote_stub_starting" : "remote_connecting",
+      progress: 5,
+      started_at: nowIso(),
+      message:
+        mode === "stub"
+          ? "Remote runtime stub bridge started; executing PX4 replay locally with remote execution metadata."
+          : `Remote PX4 runtime bridge connecting to ${config.sshTarget}.`,
+    });
+
+    if (mode === "stub") {
+      await runStandalonePx4RuntimeReplayJob(jobId);
+      return;
+    }
+
+    const connection = await testRemoteConnection(config);
+    if (connection.exitCode !== 0 || !connection.stdout.includes("contact-departure-remote-runtime-ok")) {
+      await completeRemoteBridgeFailure(
+        jobId,
+        "remote_connection_failed",
+        connection.stderr.trim() ||
+          connection.stdout.trim() ||
+          `SSH connection to ${config.sshTarget} failed.`,
+        config,
+      );
+      return;
+    }
+
+    await updateStatus(jobId, {
+      state: "running",
+      phase: "remote_sync_outbound",
+      progress: 12,
+      message: `Syncing job folder to remote runtime at ${config.sshTarget}.`,
+    });
+
+    const outbound = await syncJobFolderToRemote(config, jobId, paths.runDirAbs);
+    if (outbound.exitCode !== 0) {
+      await completeRemoteBridgeFailure(
+        jobId,
+        "remote_setup_failed",
+        outbound.stderr.trim() || outbound.stdout.trim() || "Failed to sync job folder to remote runtime.",
+        config,
+      );
+      return;
+    }
+
+    await updateStatus(jobId, {
+      state: "running",
+      phase: "remote_launching_runner",
+      progress: 18,
+      message: "Launching PX4 runtime replay runner on remote pod.",
+    });
+
+    const launch = await launchRemotePx4RuntimeReplayRunner(config, jobId);
+    if (launch.exitCode !== 0 || !launch.remotePid) {
+      await completeRemoteBridgeFailure(
+        jobId,
+        "remote_runner_launch_failed",
+        launch.message,
+        config,
+      );
+      return;
+    }
+    await updateRemoteRunnerPid(jobId, launch.remotePid);
+    const bridgeProcess = (await readStatus(jobId)).runner?.process;
+
+    const deadline = Date.now() + REMOTE_RUNTIME_MAX_WAIT_MS;
+    let lastPhase = "";
+    while (Date.now() < deadline) {
+      if (controller.signal.aborted || (await shouldStopRunner(jobId))) {
+        return;
+      }
+
+      const sync = await syncRemoteJobStateToLocal(config, jobId, paths.runDirAbs);
+      if (!sync.synced) {
+        await updateStatus(jobId, {
+          state: "running",
+          phase: "remote_polling",
+          progress: Math.min(95, (await readStatus(jobId)).progress + 1),
+          message: sync.message ?? "Waiting for remote runtime status.",
+        });
+        await delay(REMOTE_RUNTIME_POLL_MS);
+        continue;
+      }
+      await preserveRemoteBridgeMetadata(jobId, bridgeProcess, config);
+
+      const status = await readStatus(jobId);
+      if (status.phase !== lastPhase) {
+        lastPhase = status.phase;
+        await appendLocalEvent(paths.eventsPath, {
+          timestamp: nowIso(),
+          state: status.state,
+          phase: status.phase,
+          progress: status.progress,
+          message: `Remote runtime update mirrored locally (${config.sshTarget}).`,
+        });
+      }
+
+      if (terminal(status.state)) {
+        const result = await readResultIfPresent(jobId);
+        const artifactPaths = result?.artifact_paths ?? [];
+        const artifactSync = await syncRemoteArtifactsToLocal(
+          config,
+          jobId,
+          paths.runDirAbs,
+          artifactPaths,
+        );
+        if (!artifactSync.synced) {
+          await completeRemoteBridgeFailure(
+            jobId,
+            "remote_sync_failed",
+            artifactSync.message ?? "Failed to sync remote artifacts back to local run folder.",
+            config,
+          );
+          return;
+        }
+        return;
+      }
+
+      await delay(REMOTE_RUNTIME_POLL_MS);
+    }
+
+    await completeRemoteBridgeFailure(
+      jobId,
+      "remote_sync_failed",
+      `Remote runtime bridge timed out after ${REMOTE_RUNTIME_MAX_WAIT_MS}ms waiting for terminal job state.`,
+      config,
+    );
+  } catch (error) {
+    if (controller.signal.aborted) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    await completeRemoteBridgeFailure(jobId, "remote_sync_failed", message, config);
+  }
+}
+
 function runnerEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of ["PATH", "TMPDIR", "TEMP", "TMP", "NODE_ENV"] as const) {
+    const value = process.env[key];
+    if (value) {
+      env[key] = value;
+    }
+  }
+  for (const key of [
+    "CONTACT_DEPARTURE_REMOTE_RUNTIME",
+    "CONTACT_DEPARTURE_REMOTE_SSH",
+    "CONTACT_DEPARTURE_REMOTE_REPO",
+    "CONTACT_DEPARTURE_REMOTE_SSH_OPTS",
+    "CONTACT_DEPARTURE_REMOTE_RSYNC_OPTS",
+    "CONTACT_DEPARTURE_REMOTE_NODE",
+  ] as const) {
     const value = process.env[key];
     if (value) {
       env[key] = value;
@@ -1885,6 +2229,44 @@ function launchStandaloneRunner(jobId: string, plan: RunnerLaunchPlan): JobRunne
   };
 }
 
+function launchRemotePx4RuntimeBridge(jobId: string): JobRunnerProcessMetadata {
+  const config = loadRemoteRuntimeConfig();
+  const runnerArgs = ["--import", "tsx", REMOTE_PX4_RUNTIME_BRIDGE_SCRIPT_PATH, jobId];
+  const child = spawn(process.execPath, runnerArgs, {
+    cwd: REPO_ROOT,
+    detached: true,
+    env: runnerEnvironment(),
+    stdio: "ignore",
+  });
+
+  if (!child.pid) {
+    throw new Error("Remote PX4 runtime bridge process did not report a pid.");
+  }
+
+  child.unref();
+  return {
+    pid: child.pid,
+    launched_at: nowIso(),
+    entrypoint: REMOTE_PX4_RUNTIME_BRIDGE_ENTRYPOINT,
+    detached: true,
+    cancel_signal: RUNNER_CANCEL_SIGNAL,
+    remote: config
+      ? {
+          ssh_target: config.sshTarget,
+          remote_repo: config.remoteRepo,
+          mode: remoteRuntimeMode() === "stub" ? "stub" : "ssh",
+        }
+      : undefined,
+  };
+}
+
+function launchRunner(jobId: string, plan: RunnerLaunchPlan): JobRunnerProcessMetadata {
+  if (plan.kind === "px4-runtime-replay" && shouldDispatchPx4ReplayRemotely()) {
+    return launchRemotePx4RuntimeBridge(jobId);
+  }
+  return launchStandaloneRunner(jobId, plan);
+}
+
 async function writeRunnerProcessMetadata(
   status: JobStatus,
   runner: JobRunnerMetadata,
@@ -1907,6 +2289,19 @@ interface RunnerSignalResult {
 }
 
 function signalRunnerProcess(status: JobStatus): RunnerSignalResult {
+  const remotePid = status.runner?.process?.remote?.remote_pid;
+  const remote = status.runner?.process?.remote;
+  if (remotePid && remote) {
+    const config: RemoteRuntimeConfig = {
+      sshTarget: remote.ssh_target,
+      remoteRepo: remote.remote_repo,
+      sshOptions: process.env.CONTACT_DEPARTURE_REMOTE_SSH_OPTS?.trim()
+        ? process.env.CONTACT_DEPARTURE_REMOTE_SSH_OPTS.trim().split(/\s+/).filter(Boolean)
+        : ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"],
+    };
+    void signalRemoteProcess(config, remotePid, "TERM").catch(() => undefined);
+  }
+
   const pid = status.runner?.process?.pid;
   if (!pid || !Number.isInteger(pid) || pid <= 0) {
     return {
@@ -1999,7 +2394,9 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
         : plan.kind === "px4-sitl-probe"
           ? "PX4 SITL runtime probe evidence job queued."
           : plan.kind === "px4-runtime-replay"
-            ? "PX4 BATTERY_STATUS runtime replay evidence job queued."
+            ? shouldDispatchPx4ReplayRemotely()
+              ? "PX4 BATTERY_STATUS runtime replay evidence job queued for remote pod execution."
+              : "PX4 BATTERY_STATUS runtime replay evidence job queued."
             : "Fake evidence job queued.";
   const status: JobStatus = {
     job_id: jobId,
@@ -2025,9 +2422,14 @@ export async function launchEvidenceJob(params: LaunchEvidenceJobInput): Promise
     message: status.message,
   });
 
-  const runnerProcess = launchStandaloneRunner(jobId, plan);
+  const runnerProcess = launchRunner(jobId, plan);
+  const remoteConfig = loadRemoteRuntimeConfig();
   const runner = {
     ...record.runner,
+    execution_host:
+      plan.kind === "px4-runtime-replay" && shouldDispatchPx4ReplayRemotely()
+        ? remoteExecutionLabel(remoteConfig)
+        : "local",
     process: runnerProcess,
   };
   await writeRunnerProcessMetadata(status, runner);

@@ -12,6 +12,7 @@
     "smoke:offline": "tsx scripts/smoke-offline.ts",
     "smoke:agent": "tsx scripts/smoke-agent.ts",
     "smoke:operator": "tsx scripts/smoke-operator.ts",
+    "smoke:remote-runtime": "tsx scripts/smoke-remote-runtime.ts",
     "agent": "tsx scripts/agent.ts",
     "demo:agent": "tsx scripts/demo-agent.ts",
     "dashboard": "tsx src/dashboard/server.ts",

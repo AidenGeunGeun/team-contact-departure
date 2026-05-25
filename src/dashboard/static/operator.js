@@ -1287,6 +1287,9 @@ function updateJobCard(row, snapshot) {
     titleize(title),
     titleize(snapshot.state),
     `${progress}%`,
+    snapshot.runtime_outcome ? titleize(snapshot.runtime_outcome) : "",
+    snapshot.frame_delivered === true ? "frame delivered" : snapshot.frame_delivered === false ? "no frame" : "",
+    snapshot.execution_host && snapshot.execution_host !== "local" ? `host ${snapshot.execution_host}` : "",
     snapshot.verdict ? titleize(snapshot.verdict) : "",
   ].filter(Boolean);
   setActivityLine(card, "Evidence", bits.join(" · "));
@@ -1375,7 +1378,11 @@ function renderInspectorFromSnapshot(snapshot) {
       ["Job", `<span class="mono">${escapeHtml(text(snapshot.job_id))}</span>`],
       ["Case", escapeHtml(text(snapshot.case_id))],
       ["Runner", escapeHtml(runnerLabel(snapshot.runner_kind))],
+      ["Execution host", escapeHtml(text(snapshot.execution_host, "local"))],
       ["State", `${escapeHtml(titleize(snapshot.state))} · ${escapeHtml(text(snapshot.progress, "0"))}%`],
+      ["Runtime outcome", escapeHtml(titleize(snapshot.runtime_outcome))],
+      ["Frame delivered", snapshot.frame_delivered === true ? "Yes" : snapshot.frame_delivered === false ? "No" : "—"],
+      ["Commit proven", snapshot.firmware_commit_proven === true ? "Yes" : snapshot.firmware_commit_proven === false ? "No" : "—"],
       ["Verdict", escapeHtml(titleize(snapshot.verdict))],
       ["Confidence", escapeHtml(titleize(snapshot.confidence))],
       ["Commit", `<span class="mono">${escapeHtml(text(snapshot.resolved_commit_hash))}</span>`],
@@ -1404,6 +1411,10 @@ function renderInspectorFromSnapshot(snapshot) {
       const preview = elements.inspectorBody.querySelector(".artifact-preview");
       preview.hidden = false;
       preview.textContent = "Loading artifact preview…";
+      if (snapshot.stub) {
+        preview.textContent = demoArtifactPreview(name, snapshot);
+        return;
+      }
       const response = await fetch(
         `/api/jobs/${encodeURIComponent(snapshot.job_id)}/artifacts/${encodeURIComponent(name)}`,
         { cache: "no-store" },
@@ -1416,6 +1427,42 @@ function renderInspectorFromSnapshot(snapshot) {
       preview.textContent = content;
     });
   });
+}
+
+function demoArtifactPreview(name, snapshot) {
+  if (name === "evidence-summary.md") {
+    return [
+      "# PX4 BATTERY_STATUS Runtime Replay Evidence Summary",
+      "",
+      `Outcome: ${snapshot.runtime_outcome ?? "runtime_clean"}`,
+      "",
+      snapshot.summary ?? "Crafted BATTERY_STATUS frame delivered in the guided remote-runtime demo.",
+      "",
+      "## Caveats",
+      "",
+      "- Simulated dashboard walkthrough; not live Pi, SSH, or PX4 evidence.",
+      "- Real runs write this artifact under runs/<job_id>/artifacts/.",
+    ].join("\n");
+  }
+  if (name === "delivery-record.json") {
+    return JSON.stringify(
+      {
+        delivery_ok: true,
+        frame_length_bytes: 53,
+        mavlink_connection: "udp:127.0.0.1:14540",
+        demo: true,
+      },
+      null,
+      2,
+    );
+  }
+  if (name === "frame-record.hex") {
+    return "fd3500000001019300... demo BATTERY_STATUS frame bytes omitted";
+  }
+  if (name === "runtime.log") {
+    return "[demo] PX4 runtime replay launched on pod-ubuntu20-stub\n[demo] BATTERY_STATUS frame delivered\n[demo] observation window completed cleanly";
+  }
+  return "Simulated artifact preview for guided demo.";
 }
 
 async function renderInspector() {
@@ -1476,9 +1523,10 @@ async function renderInspector() {
   }
   renderInspectorFromSnapshot({
     job_id: jobId,
-    case_id: detail.case_id ?? staticSource.case_id,
+    case_id: detail.case_id ?? staticSource.case_id ?? result.px4_runtime_replay?.case_id,
     case_title: detail.case_title ?? detail.resolved_case?.title,
     runner_kind: detail.runner_kind ?? result.runner_kind,
+    execution_host: detail.execution_host ?? detail.status?.runner?.execution_host ?? detail.runner?.execution_host,
     state: detail.state,
     phase: detail.phase,
     progress: detail.progress,
@@ -1486,6 +1534,9 @@ async function renderInspector() {
     confidence: result.confidence,
     summary: result.summary ?? detail.summary,
     caveats: result.cautions ?? [],
+    runtime_outcome: result.px4_runtime_replay?.outcome,
+    frame_delivered: result.px4_runtime_replay?.frame_delivered,
+    firmware_commit_proven: result.px4_runtime_replay?.firmware_commit_proven,
     resolved_commit_hash:
       detail.resolved_commit_hash ??
       staticSource.resolved_commit_hash ??
@@ -2317,12 +2368,13 @@ async function loadConfig() {
   const { payload } = await fetchJson("/api/operator/config");
   state.config = payload;
   if (elements.sessionDemoButton) {
-    elements.sessionDemoButton.title = "Run the canonical parser-bounds demo.";
+    elements.sessionDemoButton.title = "Run a guided remote-runtime operator walkthrough.";
   }
 }
 
-function prepareDemoSessionView(demoPrompt) {
-  state.stubSession = stubFromUrl;
+function prepareDemoSessionView(demoPrompt, options = {}) {
+  const stub = options.stub === true || stubFromUrl;
+  state.stubSession = stub;
   state.demoLaunching = true;
   state.demoViewPrepared = true;
   state.playbackMode = false;
@@ -2333,8 +2385,8 @@ function prepareDemoSessionView(demoPrompt) {
   closeInspectorPanel();
   setSessionMode(true);
   setComposerEnabled(false);
-  if (stubFromUrl) {
-    setNotice("Stub session — simulated stream, not live Pi evidence.", "warn");
+  if (stub) {
+    setNotice("Guided demo — simulated stream, not live Pi or pod evidence.", "warn");
   } else {
     clearNotice();
   }
@@ -2355,8 +2407,8 @@ async function runDemo() {
     setNotice("Wait for the current turn to finish, or press Stop.", "warn");
     return;
   }
-  prepareDemoSessionView(demoPrompt);
-  await submitPrompt(demoPrompt, { stub: stubFromUrl, fresh: true });
+  prepareDemoSessionView(demoPrompt, { stub: true });
+  await submitPrompt(demoPrompt, { stub: true, fresh: true });
 }
 
 const urlParams = new URL(window.location.href).searchParams;
